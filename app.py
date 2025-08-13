@@ -11,6 +11,147 @@ try:
 except Exception:
     generate_statements_excel = None  # type: ignore
 
+# Fallback: define generate_statements_excel locally if not provided by module `a`
+if generate_statements_excel is None:
+    import io as _io
+    import pandas as _pd
+    from openpyxl.styles import Font as _Font, Alignment as _Alignment, PatternFill as _PatternFill
+
+    def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes | None:  # type: ignore
+        # 1) First pass
+        results = _mcc_mod.call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=_mcc_mod.EXTRA_ACCURACY_FIRST)
+
+        # 2) Select non-"Others" pages
+        selected_pages = [
+            idx + 1
+            for idx, res in enumerate(results)
+            if res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
+        ]
+        if not selected_pages:
+            return None
+
+        # Build selected-pages PDF for second pass
+        orig_reader = PdfReader(_io.BytesIO(pdf_bytes))
+        _w = PdfWriter()
+        for pno in selected_pages:
+            _w.add_page(orig_reader.pages[pno - 1])
+        _tmp = _io.BytesIO(); _w.write(_tmp); _tmp.seek(0)
+        selected_bytes = _tmp.getvalue()
+
+        # 3) Second pass
+        stem = Path(original_filename).stem
+        second_res = _mcc_mod.call_fracto(
+            selected_bytes,
+            f"{stem}_selected.pdf",
+            parser_app=_mcc_mod.SECOND_PARSER_APP_ID,
+            model=_mcc_mod.SECOND_MODEL_ID,
+            extra_accuracy=_mcc_mod.EXTRA_ACCURACY_SECOND,
+        )
+
+        # 4) Classification (with fallback)
+        classification = (
+            second_res.get("data", {}).get("parsedData", {}).get("page_wise_classification", [])
+        )
+        if not classification:
+            classification = [
+                {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
+                for i, r in enumerate(results)
+                if r.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
+            ]
+            classification = [it for it in classification if (it["page_number"] in selected_pages)]
+        if not classification:
+            return None
+
+        # 5) Group doc_type → original page numbers
+        groups: dict[str, list[int]] = {}
+        for item in classification:
+            doc_type   = item.get("doc_type")
+            sel_pageno = item.get("page_number")
+            if doc_type and isinstance(sel_pageno, int):
+                if 1 <= sel_pageno <= len(selected_pages):
+                    orig_pageno = selected_pages[sel_pageno - 1]
+                else:
+                    orig_pageno = sel_pageno
+                groups.setdefault(doc_type, []).append(orig_pageno)
+        if not groups:
+            return None
+
+        # 6) Third pass per group (sequential to be Cloud-friendly)
+        combined_sheets: dict[str, _pd.DataFrame] = {}
+        routing_used: dict[str, dict] = {}
+        for doc_type, page_list in groups.items():
+            page_list = sorted(page_list)
+            _gw = PdfWriter()
+            for pno in page_list:
+                _gw.add_page(orig_reader.pages[pno - 1])
+            _b = _io.BytesIO(); _gw.write(_b); _b.seek(0)
+            group_bytes = _b.getvalue()
+
+            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type)
+            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
+
+            group_res = _mcc_mod.call_fracto(
+                group_bytes,
+                f"{stem}_{doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')}.pdf",
+                parser_app=parser_app,
+                model=model_id,
+                extra_accuracy=extra_acc,
+            )
+            parsed = group_res.get("data", {}).get("parsedData", [])
+            if isinstance(parsed, list) and parsed:
+                all_keys = []
+                for row in parsed:
+                    for k in row.keys():
+                        if k not in all_keys: all_keys.append(k)
+                rows = [{k: r.get(k, "") for k in all_keys} for r in parsed]
+                df = _pd.DataFrame(rows, columns=all_keys)
+                combined_sheets[doc_type] = df
+
+        if not combined_sheets:
+            return None
+
+        # 7) Write workbook (same header styling + freeze panes)
+        out_buf = _io.BytesIO()
+        with _pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
+            for sheet_name, df in combined_sheets.items():
+                safe = sheet_name[:31] or "Sheet"
+                df.to_excel(writer, sheet_name=safe, index=False)
+                ws = writer.book[safe]
+                header_font  = _Font(bold=True, color="FFFFFF")
+                header_fill  = _PatternFill("solid", fgColor="305496")
+                header_align = _Alignment(vertical="center", horizontal="center", wrap_text=True)
+                max_width = 60
+                for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
+                    longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+                    width = min(max(longest + 2, 10), max_width)
+                    ws.column_dimensions[col[0].column_letter].width = width
+                    for c in col[1:]:
+                        c.alignment = _Alignment(vertical="top", wrap_text=True)
+                for cell in ws[1]:
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = header_align
+                ws.freeze_panes = "A2"
+
+            # Optional Routing Summary at end if you turn it on
+            include_summary = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
+            if include_summary and routing_used:
+                rows = []
+                for dt in sorted(routing_used):
+                    cfg = routing_used[dt]
+                    rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra",""))])
+                _pd.DataFrame(rows, columns=["Doc Type","Parser App ID","Model","Extra Accuracy"])\
+                   .to_excel(writer, sheet_name="Routing Summary", index=False)
+                ws = writer.book["Routing Summary"]
+                for cell in ws[1]:
+                    cell.font = _Font(bold=True, color="FFFFFF")
+                    cell.fill = _PatternFill("solid", fgColor="305496")
+                    cell.alignment = _Alignment(vertical="center", horizontal="center", wrap_text=True)
+                ws.freeze_panes = "A2"
+
+        out_buf.seek(0)
+        return out_buf.getvalue()
+
 import io, textwrap
 import streamlit as st
 import os
@@ -19,7 +160,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import base64
 # moved above to import from module `a`
-from PyPDF2 import PdfReader
+from PyPDF2 import PdfReader, PdfWriter
 
 # ── Page config (must be first Streamlit command) ─────────────
 st.set_page_config(
@@ -424,32 +565,52 @@ if st.session_state["excel_bytes"]:
         key="download_original",
     )
 
-    df = pd.read_excel(io.BytesIO(st.session_state["excel_bytes"]))
-    edited_df = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="editable_grid",
+    # Support multi-sheet workbooks (like Statements). Default to first non-summary sheet.
+xls = pd.ExcelFile(io.BytesIO(st.session_state["excel_bytes"]))
+all_sheets = xls.sheet_names
+editable_sheets = [s for s in all_sheets if s.lower() != "routing summary"] or all_sheets
+
+if "selected_sheet" not in st.session_state:
+    st.session_state["selected_sheet"] = editable_sheets[0]
+
+st.write("**Select sheet to review/edit**")
+selected_sheet = st.selectbox("Sheet", editable_sheets, index=editable_sheets.index(st.session_state["selected_sheet"]))
+st.session_state["selected_sheet"] = selected_sheet
+
+df = pd.read_excel(xls, sheet_name=selected_sheet)
+edited_df = st.data_editor(
+    df,
+    num_rows="dynamic",
+    use_container_width=True,
+    key=f"editable_grid_{selected_sheet}",
+)
+
+if st.button("💾 Save edits"):
+    from openpyxl import load_workbook
+    wb_orig = load_workbook(io.BytesIO(st.session_state["excel_bytes"]))
+    ws      = wb_orig[selected_sheet]
+
+    # Update header to match edited columns (keeps existing cell styles)
+    for c_idx, col_name in enumerate(list(edited_df.columns), start=1):
+        ws.cell(row=1, column=c_idx, value=str(col_name))
+
+    # Overwrite data rows using fast itertuples (values only)
+    for r_idx, row in enumerate(edited_df.itertuples(index=False), start=2):
+        for c_idx, value in enumerate(row, start=1):
+            ws.cell(row=r_idx, column=c_idx, value=value)
+
+    # Trim any leftover rows below the new data
+    last_data_row = edited_df.shape[0] + 1  # header is row 1
+    if ws.max_row > last_data_row:
+        ws.delete_rows(last_data_row + 1, ws.max_row - last_data_row)
+
+    out_buf = io.BytesIO()
+    wb_orig.save(out_buf)
+    st.session_state["edited_excel_bytes"] = out_buf.getvalue()
+    st.session_state["edited_filename"] = (
+        Path(st.session_state["excel_filename"]).with_suffix("").name + f"_{selected_sheet}_edited.xlsx"
     )
-
-    if st.button("💾 Save edits"):
-        # Load original workbook to preserve formatting
-        from openpyxl import load_workbook
-        wb_orig = load_workbook(io.BytesIO(st.session_state["excel_bytes"]))
-        ws      = wb_orig.active
-
-        # Overwrite data rows (assumes header is row 1)
-        for r_idx, (_, row) in enumerate(edited_df.iterrows(), start=2):
-            for c_idx, value in enumerate(row, start=1):
-                ws.cell(row=r_idx, column=c_idx, value=value)
-
-        out_buf = io.BytesIO()
-        wb_orig.save(out_buf)
-        st.session_state["edited_excel_bytes"] = out_buf.getvalue()
-        st.session_state["edited_filename"] = (
-            Path(st.session_state["excel_filename"]).with_suffix("").name + "_edited.xlsx"
-        )
-        st.success("Edits saved — scroll below to download the .xlsx file.")
+    st.success(f"Edits to '{selected_sheet}' saved — scroll below to download the .xlsx file.")
 
     if st.session_state.get("edited_excel_bytes"):
         st.download_button(
