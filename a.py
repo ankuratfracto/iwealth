@@ -625,10 +625,10 @@ def _cli():
 
                                 # Autofit columns & header style
                                 ws = writer.book[safe_name]
-                                from openpyxl.styles import Font, Alignment, PatternFill
                                 header_font  = Font(bold=True, color="FFFFFF")
                                 header_fill  = PatternFill("solid", fgColor="305496")
                                 header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
+    # (Search for any other in-function openpyxl.styles import and remove)
 
                                 max_width = 60
                                 for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
