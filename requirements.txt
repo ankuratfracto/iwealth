@@ -1,0 +1,7 @@
+streamlit>=1.35.0
+openpyxl
+requests
+pyyaml
+matplotlib
+PyPDF2
+reportlab
