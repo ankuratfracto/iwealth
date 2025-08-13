@@ -578,6 +578,11 @@ def _cli():
 
                                         import pandas as pd
                                         df = pd.DataFrame(rows, columns=all_keys)
+                                        for col in df.columns:
+                                            series = df[col].replace("", pd.NA)
+                                            conv = pd.to_numeric(series, errors="coerce")
+                                            if conv.isna().eq(series.isna()).all():
+                                                df[col] = conv
 
                                         combined_sheets[doc_type] = df  # store for final workbook
                                 except Exception as exc:
@@ -658,7 +663,7 @@ def _cli():
                                 ws_sum.freeze_panes = "A2"
 
                         logger.info("Combined Excel workbook written to %s", combined_excel_path)
-                        third_pass_time = time.time() - _t2
+                    third_pass_time = time.time() - _t2
     else:
         logger.warning("No classified pages found (all 'Others'); skipping second pass.")
 
@@ -783,6 +788,20 @@ def write_excel_from_ocr(
             excel_row.append(value)
         ws.append(excel_row)
         written += 1
+
+    # Convert numeric-like columns to proper numbers
+    import pandas as pd
+    for idx, _ in enumerate(headers, start=1):
+        values = [ws.cell(row=r, column=idx).value for r in range(2, ws.max_row + 1)]
+        series = pd.Series(values).replace("", pd.NA)
+        converted = pd.to_numeric(series, errors="coerce")
+        if converted.isna().eq(series.isna()).all():
+            for r, val in enumerate(converted, start=2):
+                if pd.isna(val):
+                    ws.cell(row=r, column=idx).value = None
+                else:
+                    fval = float(val)
+                    ws.cell(row=r, column=idx).value = int(fval) if fval.is_integer() else fval
 
     # ── Styling (same as before) ──
     header_font  = Font(bold=True, color="FFFFFF")
