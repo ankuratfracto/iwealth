@@ -340,6 +340,7 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import base64
+import logging
 # moved above to import from module `a`
 from PyPDF2 import PdfReader, PdfWriter
 
@@ -526,7 +527,11 @@ def build_logo_strip(logo_paths: list[str]) -> str:
         if not img_path.exists():
             continue
         mime = "image/svg+xml" if img_path.suffix.lower() == ".svg" else "image/png"
-        b64   = base64.b64encode(img_path.read_bytes()).decode("utf-8")
+        try:
+            b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
+        except Exception as e:
+            logging.warning("Failed to read logo %s: %s", img_path, e)
+            continue
         tags += f"<img src='data:{mime};base64,{b64}' alt='' />"
     # Duplicate sequence so the CSS animation loops seamlessly
     return f"<div class='logo-strip-wrapper'><div class='logo-strip'>{tags}{tags}</div></div>"
