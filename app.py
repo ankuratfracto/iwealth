@@ -595,7 +595,7 @@ if not st.session_state["authenticated"]:
     uname = st.text_input("Username")
     pword = st.text_input("Password", type="password")
     if st.button("Login"):
-        if uname == "mcc" and pword == "mcc@99":
+        if uname == "iwealth" and pword == "iwealth@99":
             st.session_state["authenticated"] = True
             st.rerun()
         else:
