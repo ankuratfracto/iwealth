@@ -5,7 +5,11 @@
 import importlib, a as _mcc_mod
 importlib.reload(_mcc_mod)
 from a import FORMATS     # refresh the constant after reload
-from a import call_fracto_parallel, write_excel_from_ocr, stamp_job_number, generate_statements_excel
+from a import call_fracto_parallel, write_excel_from_ocr, stamp_job_number
+try:
+    from a import generate_statements_excel  # optional; present on latest code
+except Exception:
+    generate_statements_excel = None  # type: ignore
 
 import io, textwrap
 import streamlit as st
@@ -366,9 +370,11 @@ if run:
         excel_bytes = None
         base_name = Path(pdf_file.name).stem
 
-        if use_statements_mode:
+        if use_statements_mode and callable(generate_statements_excel):
             progress.progress(0.6, text="Grouping by document type…")
             excel_bytes = generate_statements_excel(pdf_bytes, pdf_file.name)
+        elif use_statements_mode and not callable(generate_statements_excel):
+            st.warning("Statements mode is on, but this deployment doesn't include generate_statements_excel() yet. Falling back to single‑sheet export. Update the app to the latest commit.")
 
         if excel_bytes is None:
             # Fallback to single-sheet mapping export
