@@ -2,13 +2,16 @@
 
 
 # Ensure the latest mapping.yaml changes are picked up
-import importlib, a as _mcc_mod
+import importlib, logging, a as _mcc_mod
 importlib.reload(_mcc_mod)
 from a import FORMATS     # refresh the constant after reload
 from a import call_fracto_parallel, write_excel_from_ocr
 try:
     from a import generate_statements_excel  # optional; present on latest code
-except Exception:
+except ImportError as exc:
+    logging.getLogger(__name__).warning(
+        "Failed to import generate_statements_excel from module 'a': %s", exc
+    )
     generate_statements_excel = None  # type: ignore
 
 from pathlib import Path

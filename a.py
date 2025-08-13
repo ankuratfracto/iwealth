@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
 
 # Process one page per chunk; still run up to 10 in parallel
 CHUNK_SIZE_PAGES = 1
@@ -13,6 +14,10 @@ def _split_pdf_bytes(pdf_bytes: bytes,
     fragment < min_tail pages is merged into the previous chunk so it retains
     invoice context (e.g. 26 pages → 5,5,5,5,6 instead of 5,5,5,5,5,1).
     """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than 0")
+    if min_tail < 0:
+        raise ValueError("min_tail must be non-negative")
     reader = PdfReader(io.BytesIO(pdf_bytes))
     total  = len(reader.pages)
     if total <= chunk_size:
@@ -61,7 +66,7 @@ def call_fracto_parallel(pdf_bytes, file_name, *, extra_accuracy: str = "true") 
 
     logger.info("Splitting %s into %d chunks of %d pages each", file_name, len(chunks), CHUNK_SIZE_PAGES)
 
-    results: list[dict] = [None] * len(chunks)
+    results: list[Optional[dict]] = [None] * len(chunks)
 
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
         # Build a human‑readable per‑page filename: <orig‑stem>_page_<N>.pdf
@@ -82,8 +87,11 @@ def call_fracto_parallel(pdf_bytes, file_name, *, extra_accuracy: str = "true") 
                 logger.error("Chunk %d failed: %s", idx + 1, exc)
                 results[idx] = {"file": file_name, "status": "error", "error": str(exc)}
 
-    _renumber_serials(results)
-    return results
+    if any(r is None for r in results):
+        raise RuntimeError("Missing OCR results for some PDF chunks")
+    final_results = [r for r in results if r is not None]
+    _renumber_serials(final_results)
+    return final_results
 #!/usr/bin/env python
 """
 fracto_page_ocr.py
@@ -236,7 +244,11 @@ def _load_formats():
         return formats
 
     with open(mapping_file, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+        try:
+            data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            logger.error("Failed to parse %s: %s", mapping_file, exc)
+            return formats
 
     # ③ modern block
     if isinstance(data, dict) and "formats" in data:
