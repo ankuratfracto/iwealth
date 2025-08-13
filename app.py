@@ -5,11 +5,14 @@
 import importlib, a as _mcc_mod
 importlib.reload(_mcc_mod)
 from a import FORMATS     # refresh the constant after reload
-from a import call_fracto_parallel, write_excel_from_ocr, stamp_job_number
+from a import call_fracto_parallel, write_excel_from_ocr
 try:
     from a import generate_statements_excel  # optional; present on latest code
 except Exception:
     generate_statements_excel = None  # type: ignore
+
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Fallback: define generate_statements_excel locally if not provided by module `a`
 if generate_statements_excel is None:
@@ -152,12 +155,190 @@ if generate_statements_excel is None:
         out_buf.seek(0)
         return out_buf.getvalue()
 
+# --- Statements Excel with progress and concurrency ---
+import os, time
+
+def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename: str, progress, status_write):
+    """Run the 1st/2nd/3rd pass with UI updates and concurrency; returns workbook bytes or None."""
+    t_overall = time.time()
+
+    # 1) First pass
+    status_write("1/3 First pass — per-page OCR …")
+    t0 = time.time()
+    results = _mcc_mod.call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=_mcc_mod.EXTRA_ACCURACY_FIRST)
+    dt0 = time.time() - t0
+    progress.progress(0.33, text=f"First pass complete in {dt0:.1f}s")
+    status_write(f"✓ First pass complete in {dt0:.1f}s — {len(results)} page(s)")
+
+    # 2) Select pages
+    selected_pages = [
+        idx + 1 for idx, res in enumerate(results)
+        if res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
+    ]
+    if not selected_pages:
+        status_write("⚠️ No classified pages (all 'Others'). Skipping 2nd/3rd pass.")
+        return None
+
+    # Build selected.pdf
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    w = PdfWriter()
+    for pno in selected_pages:
+        w.add_page(reader.pages[pno - 1])
+    tmp = io.BytesIO(); w.write(tmp); tmp.seek(0)
+    selected_bytes = tmp.getvalue()
+
+    # 3) Second pass
+    status_write("2/3 Second pass — classifying selected pages …")
+    stem = Path(original_filename).stem
+    t1 = time.time()
+    second_res = _mcc_mod.call_fracto(
+        selected_bytes,
+        f"{stem}_selected.pdf",
+        parser_app=_mcc_mod.SECOND_PARSER_APP_ID,
+        model=_mcc_mod.SECOND_MODEL_ID,
+        extra_accuracy=_mcc_mod.EXTRA_ACCURACY_SECOND,
+    )
+    dt1 = time.time() - t1
+    progress.progress(0.55, text=f"Second pass complete in {dt1:.1f}s")
+    status_write(f"✓ Second pass complete in {dt1:.1f}s")
+
+    # 4) Classification (w/ fallback)
+    classification = (
+        second_res.get("data", {}).get("parsedData", {}).get("page_wise_classification", [])
+    )
+    if not classification:
+        classification = [
+            {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
+            for i, r in enumerate(results)
+            if r.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
+        ]
+        classification = [it for it in classification if (it["page_number"] in selected_pages)]
+    if not classification:
+        status_write("⚠️ Could not derive classification — aborting third pass.")
+        return None
+
+    # 5) Group pages by doc_type (map back to original page numbers)
+    groups: dict[str, list[int]] = {}
+    for item in classification:
+        doc_type   = item.get("doc_type")
+        sel_pageno = item.get("page_number")
+        if doc_type and isinstance(sel_pageno, int):
+            if 1 <= sel_pageno <= len(selected_pages):
+                orig_pageno = selected_pages[sel_pageno - 1]
+            else:
+                orig_pageno = sel_pageno
+            groups.setdefault(doc_type, []).append(orig_pageno)
+    if not groups:
+        status_write("⚠️ No groups found after classification.")
+        return None
+
+    n_groups = len(groups)
+    status_write(f"3/3 Third pass — {n_groups} document type(s): {sorted(groups.keys())}")
+
+    # 6) Process groups concurrently (limit = MAX_PARALLEL)
+    combined_sheets: dict[str, pd.DataFrame] = {}
+    routing_used: dict[str, dict] = {}
+    completed = 0
+    total = n_groups
+
+    with ThreadPoolExecutor(max_workers=min(_mcc_mod.MAX_PARALLEL, n_groups)) as pool:
+        futures = {}
+        for doc_type, page_list in groups.items():
+            page_list = sorted(page_list)
+            gw = PdfWriter()
+            for pno in page_list:
+                gw.add_page(reader.pages[pno - 1])
+            b = io.BytesIO(); gw.write(b); b.seek(0)
+            group_bytes = b.getvalue()
+
+            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type)
+            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
+
+            futures[pool.submit(
+                _mcc_mod.call_fracto,
+                group_bytes,
+                f"{stem}_{doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')}.pdf",
+                parser_app=parser_app,
+                model=model_id,
+                extra_accuracy=extra_acc,
+            )] = doc_type
+
+        for fut in as_completed(futures):
+            doc_type = futures[fut]
+            try:
+                g0 = time.time()
+                group_res = fut.result()
+                gdt = time.time() - g0
+                status_write(f"  ✓ {doc_type} done in {gdt:.1f}s")
+            except Exception as exc:
+                status_write(f"  ✗ {doc_type} failed: {exc}")
+                continue
+            finally:
+                completed += 1
+                progress.progress(0.55 + 0.40 * (completed / total), text=f"Third pass {completed}/{total}: {doc_type}")
+
+            parsed = group_res.get("data", {}).get("parsedData", [])
+            if isinstance(parsed, list) and parsed:
+                all_keys = []
+                for row in parsed:
+                    for k in row.keys():
+                        if k not in all_keys:
+                            all_keys.append(k)
+                rows = [{k: r.get(k, "") for k in all_keys} for r in parsed]
+                df_ = pd.DataFrame(rows, columns=all_keys)
+                combined_sheets[doc_type] = df_
+
+    if not combined_sheets:
+        status_write("⚠️ No tabular data parsed in third pass.")
+        return None
+
+    # 7) Write workbook to bytes
+    out_buf = io.BytesIO()
+    with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
+        for sheet_name, df_ in combined_sheets.items():
+            safe = sheet_name[:31] or "Sheet"
+            df_.to_excel(writer, sheet_name=safe, index=False)
+            ws = writer.book[safe]
+            from openpyxl.styles import Font as _F, Alignment as _A, PatternFill as _P
+            header_font  = _F(bold=True, color="FFFFFF")
+            header_fill  = _P("solid", fgColor="305496")
+            header_align = _A(vertical="center", horizontal="center", wrap_text=True)
+            max_width = 60
+            for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
+                longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+                width = min(max(longest + 2, 10), max_width)
+                ws.column_dimensions[col[0].column_letter].width = width
+                for c in col[1:]:
+                    c.alignment = _A(vertical="top", wrap_text=True)
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_align
+            ws.freeze_panes = "A2"
+
+        # Optional routing summary at end
+        include_summary = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
+        if include_summary and routing_used:
+            rows = []
+            for dt in sorted(routing_used):
+                cfg = routing_used[dt]
+                rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra",""))])
+            pd.DataFrame(rows, columns=["Doc Type","Parser App ID","Model","Extra Accuracy"]).to_excel(writer, sheet_name="Routing Summary", index=False)
+            ws = writer.book["Routing Summary"]
+            from openpyxl.styles import Font as _F, Alignment as _A, PatternFill as _P
+            for cell in ws[1]:
+                cell.font = _F(bold=True, color="FFFFFF"); cell.fill = _P("solid", fgColor="305496"); cell.alignment = _A(vertical="center", horizontal="center", wrap_text=True)
+            ws.freeze_panes = "A2"
+
+    out_buf.seek(0)
+    progress.progress(1.0, text=f"All done in {time.time()-t_overall:.1f}s")
+    status_write("✅ Excel ready to download.")
+    return out_buf.getvalue()
+
 import io, textwrap
 import streamlit as st
-import os
 import pandas as pd
 import matplotlib.pyplot as plt
-from pathlib import Path
 import base64
 # moved above to import from module `a`
 from PyPDF2 import PdfReader, PdfWriter
@@ -467,23 +648,9 @@ if pdf_file:
     # Reset file pointer for later reading
     pdf_file.seek(0)
 
-# ── Manual overrides ─────────────────────────────────────────────
 st.markdown("#### Optional manual fields")
+# (Hidden for now) No manual UI fields; you can still set overrides programmatically if needed.
 manual_inputs: dict[str, str] = {}
-job_no: str | None = None
-
-manual_fields = ["Job Number"]    # add more keys here if needed
-TOOLTIPS = {
-    "Job Number": "Stamped at the top of every page in the PDF.",
-}
-for col in manual_fields:
-    val = st.text_input(col, key=f"manual_{col}", help=TOOLTIPS.get(col, ""))
-    if not val:
-        continue
-    if col == "Job Number":
-        job_no = val          # used only for PDF stamping
-    else:
-        manual_inputs[col] = val  # Excel overrides
 
 selected_format_cfg = None
 if not use_statements_mode:
@@ -504,18 +671,14 @@ if run:
     try:
         pdf_bytes = pdf_file.read()
         progress.progress(0.2)
-        if job_no:
-            pdf_bytes = stamp_job_number(pdf_bytes, job_no)
         progress.progress(0.4)
 
         excel_bytes = None
         base_name = Path(pdf_file.name).stem
 
-        if use_statements_mode and callable(generate_statements_excel):
-            progress.progress(0.6, text="Grouping by document type…")
-            excel_bytes = generate_statements_excel(pdf_bytes, pdf_file.name)
-        elif use_statements_mode and not callable(generate_statements_excel):
-            st.warning("Statements mode is on, but this deployment doesn't include generate_statements_excel() yet. Falling back to single‑sheet export. Update the app to the latest commit.")
+        if use_statements_mode:
+            with st.status("Processing…", expanded=True) as status_box:
+                excel_bytes = generate_statements_excel_with_progress(pdf_bytes, pdf_file.name, progress, status_box.write)
 
         if excel_bytes is None:
             # Fallback to single-sheet mapping export
@@ -566,51 +729,55 @@ if st.session_state["excel_bytes"]:
     )
 
     # Support multi-sheet workbooks (like Statements). Default to first non-summary sheet.
-xls = pd.ExcelFile(io.BytesIO(st.session_state["excel_bytes"]))
-all_sheets = xls.sheet_names
-editable_sheets = [s for s in all_sheets if s.lower() != "routing summary"] or all_sheets
+    try:
+        xls = pd.ExcelFile(io.BytesIO(st.session_state["excel_bytes"]), engine="openpyxl")
+    except Exception as e:
+        st.error(f"Could not open the generated Excel: {e}")
+        st.stop()
+    all_sheets = xls.sheet_names
+    editable_sheets = [s for s in all_sheets if s.lower() != "routing summary"] or all_sheets
 
-if "selected_sheet" not in st.session_state:
-    st.session_state["selected_sheet"] = editable_sheets[0]
+    if "selected_sheet" not in st.session_state:
+        st.session_state["selected_sheet"] = editable_sheets[0]
 
-st.write("**Select sheet to review/edit**")
-selected_sheet = st.selectbox("Sheet", editable_sheets, index=editable_sheets.index(st.session_state["selected_sheet"]))
-st.session_state["selected_sheet"] = selected_sheet
+    st.write("**Select sheet to review/edit**")
+    selected_sheet = st.selectbox("Sheet", editable_sheets, index=editable_sheets.index(st.session_state["selected_sheet"]))
+    st.session_state["selected_sheet"] = selected_sheet
 
-df = pd.read_excel(xls, sheet_name=selected_sheet)
-edited_df = st.data_editor(
-    df,
-    num_rows="dynamic",
-    use_container_width=True,
-    key=f"editable_grid_{selected_sheet}",
-)
-
-if st.button("💾 Save edits"):
-    from openpyxl import load_workbook
-    wb_orig = load_workbook(io.BytesIO(st.session_state["excel_bytes"]))
-    ws      = wb_orig[selected_sheet]
-
-    # Update header to match edited columns (keeps existing cell styles)
-    for c_idx, col_name in enumerate(list(edited_df.columns), start=1):
-        ws.cell(row=1, column=c_idx, value=str(col_name))
-
-    # Overwrite data rows using fast itertuples (values only)
-    for r_idx, row in enumerate(edited_df.itertuples(index=False), start=2):
-        for c_idx, value in enumerate(row, start=1):
-            ws.cell(row=r_idx, column=c_idx, value=value)
-
-    # Trim any leftover rows below the new data
-    last_data_row = edited_df.shape[0] + 1  # header is row 1
-    if ws.max_row > last_data_row:
-        ws.delete_rows(last_data_row + 1, ws.max_row - last_data_row)
-
-    out_buf = io.BytesIO()
-    wb_orig.save(out_buf)
-    st.session_state["edited_excel_bytes"] = out_buf.getvalue()
-    st.session_state["edited_filename"] = (
-        Path(st.session_state["excel_filename"]).with_suffix("").name + f"_{selected_sheet}_edited.xlsx"
+    df = pd.read_excel(xls, sheet_name=selected_sheet)
+    edited_df = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"editable_grid_{selected_sheet}",
     )
-    st.success(f"Edits to '{selected_sheet}' saved — scroll below to download the .xlsx file.")
+
+    if st.button("💾 Save edits"):
+        from openpyxl import load_workbook
+        wb_orig = load_workbook(io.BytesIO(st.session_state["excel_bytes"]))
+        ws      = wb_orig[selected_sheet]
+
+        # Update header to match edited columns (keeps existing cell styles)
+        for c_idx, col_name in enumerate(list(edited_df.columns), start=1):
+            ws.cell(row=1, column=c_idx, value=str(col_name))
+
+        # Overwrite data rows using fast itertuples (values only)
+        for r_idx, row in enumerate(edited_df.itertuples(index=False), start=2):
+            for c_idx, value in enumerate(row, start=1):
+                ws.cell(row=r_idx, column=c_idx, value=value)
+
+        # Trim any leftover rows below the new data
+        last_data_row = edited_df.shape[0] + 1  # header is row 1
+        if ws.max_row > last_data_row:
+            ws.delete_rows(last_data_row + 1, ws.max_row - last_data_row)
+
+        out_buf = io.BytesIO()
+        wb_orig.save(out_buf)
+        st.session_state["edited_excel_bytes"] = out_buf.getvalue()
+        st.session_state["edited_filename"] = (
+            Path(st.session_state["excel_filename"]).with_suffix("").name + f"_{selected_sheet}_edited.xlsx"
+        )
+        st.success(f"Edits to '{selected_sheet}' saved — scroll below to download the .xlsx file.")
 
     if st.session_state.get("edited_excel_bytes"):
         st.download_button(
@@ -634,22 +801,16 @@ if st.button("💾 Save edits"):
         st.metric("Total Qty", f"{view_df['Qty'].sum():,.0f}")
     if "Unit Price" in view_df.columns:
         total_unit_price = (
-            pd.to_numeric(view_df["Unit Price"], errors="coerce")  # convert non‑numbers → NaN
-              .fillna(0)                                           # treat NaNs as 0
-              .sum()
+            pd.to_numeric(view_df["Unit Price"], errors="coerce").fillna(0).sum()
         )
-        st.metric("Sum Unit Price", f"{total_unit_price:,.0f}")
+        st.metric("Sum Unit Price", f"{total_unit_price:,.0f}")
 
     # ── Top Part Numbers by Qty chart ─────────────────────────
     if {"Part No.", "Qty"}.issubset(view_df.columns):
         st.markdown("#### Top SKUs by Qty")
         top_qty = (
-            view_df.groupby("Part No.")["Qty"]
-            .sum(numeric_only=True)
-            .sort_values(ascending=False)
-            .head(10)
+            view_df.groupby("Part No.")["Qty"].sum(numeric_only=True).sort_values(ascending=False).head(10)
         )
-
         if top_qty.empty or top_qty.shape[0] < 1:
             st.info("No Qty data available to plot.")
         else:
