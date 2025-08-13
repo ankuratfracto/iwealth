@@ -181,6 +181,7 @@ EXTRA_ACCURACY_THIRD  = os.getenv("FRACTO_EXTRA_ACCURACY_THIRD",  "true")
 # You can either edit this dict directly or provide an env var FRACTO_DOC_TYPE_ROUTING
 # with a JSON mapping like: {"bank statement": {"parser": "abc123", "model": "gv1", "extra": "true"}}
 # 👉 Mark your parser IDs per doc_type here (and they will also show in the Excel "Routing Summary" sheet).
+# To include the "Routing Summary" sheet, set FRACTO_INCLUDE_ROUTING_SUMMARY=true (it's off by default).
 DOC_TYPE_ROUTING: dict[str, dict] = {
     # Example:
     # "bank statement": {"parser": "aaaaBBBBccccDDDD", "model": "gv1", "extra": "true"},
@@ -584,41 +585,6 @@ def _cli():
                         combined_excel_path = Path(pdf_path).with_name(f"{stem}_statements.xlsx")
                         import pandas as pd
                         with pd.ExcelWriter(combined_excel_path, engine="openpyxl") as writer:
-                            # Write a summary sheet first so it appears on the left
-                            summary_cols = ["Doc Type", "Parser App ID", "Model", "Extra Accuracy"]
-                            summary_rows = []
-                            for dt in sorted(routing_used):
-                                cfg = routing_used.get(dt, {})
-                                summary_rows.append([
-                                    dt,
-                                    cfg.get("parser_app", ""),
-                                    cfg.get("model", ""),
-                                    str(cfg.get("extra", "")),
-                                ])
-
-                            import pandas as pd  # ensure pd is available even if scope changes
-                            summary_df = pd.DataFrame(summary_rows, columns=summary_cols)
-                            summary_df.to_excel(writer, sheet_name="Routing Summary", index=False)
-
-                            # Style the summary header and columns
-                            ws_sum = writer.book["Routing Summary"]
-                            header_font  = Font(bold=True, color="FFFFFF")
-                            header_fill  = PatternFill("solid", fgColor="305496")
-                            header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-
-                            max_width = 60
-                            for col in ws_sum.iter_cols(min_row=1, max_row=ws_sum.max_row):
-                                longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-                                width = min(max(longest + 2, 10), max_width)
-                                ws_sum.column_dimensions[col[0].column_letter].width = width
-                                for c in col[1:]:
-                                    c.alignment = Alignment(vertical="top", wrap_text=True)
-                            for cell in ws_sum[1]:
-                                cell.font = header_font
-                                cell.fill = header_fill
-                                cell.alignment = header_align
-                            ws_sum.freeze_panes = "A2"
-
                             for sheet_name, df in combined_sheets.items():
                                 safe_name = sheet_name[:31] or "Sheet"
                                 df.to_excel(writer, sheet_name=safe_name, index=False)
@@ -642,6 +608,42 @@ def _cli():
                                     cell.fill = header_fill
                                     cell.alignment = header_align
                                 ws.freeze_panes = "A2"
+
+                            # Optionally write a "Routing Summary" sheet at the END (disabled by default)
+                            include_summary = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1", "true", "yes", "y", "on")
+                            if include_summary:
+                                summary_cols = ["Doc Type", "Parser App ID", "Model", "Extra Accuracy"]
+                                summary_rows = []
+                                for dt in sorted(routing_used):
+                                    cfg = routing_used.get(dt, {})
+                                    summary_rows.append([
+                                        dt,
+                                        cfg.get("parser_app", ""),
+                                        cfg.get("model", ""),
+                                        str(cfg.get("extra", "")),
+                                    ])
+
+                                summary_df = pd.DataFrame(summary_rows, columns=summary_cols)
+                                summary_df.to_excel(writer, sheet_name="Routing Summary", index=False)
+
+                                # Style the summary header and columns
+                                ws_sum = writer.book["Routing Summary"]
+                                header_font  = Font(bold=True, color="FFFFFF")
+                                header_fill  = PatternFill("solid", fgColor="305496")
+                                header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
+
+                                max_width = 60
+                                for col in ws_sum.iter_cols(min_row=1, max_row=ws_sum.max_row):
+                                    longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+                                    width = min(max(longest + 2, 10), max_width)
+                                    ws_sum.column_dimensions[col[0].column_letter].width = width
+                                    for c in col[1:]:
+                                        c.alignment = Alignment(vertical="top", wrap_text=True)
+                                for cell in ws_sum[1]:
+                                    cell.font = header_font
+                                    cell.fill = header_fill
+                                    cell.alignment = header_align
+                                ws_sum.freeze_panes = "A2"
 
                         logger.info("Combined Excel workbook written to %s", combined_excel_path)
                         third_pass_time = time.time() - _t2

@@ -2,9 +2,10 @@
 
 
 # Ensure the latest mapping.yaml changes are picked up
-import importlib, mcc as _mcc_mod
+import importlib, a as _mcc_mod
 importlib.reload(_mcc_mod)
-from mcc import FORMATS     # refresh the constant after reload
+from a import FORMATS     # refresh the constant after reload
+from a import call_fracto_parallel, write_excel_from_ocr, stamp_job_number, generate_statements_excel
 
 import io, textwrap
 import streamlit as st
@@ -13,7 +14,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 import base64
-from mcc import call_fracto_parallel, write_excel_from_ocr, stamp_job_number
+# moved above to import from module `a`
 from PyPDF2 import PdfReader
 
 # ── Page config (must be first Streamlit command) ─────────────
@@ -275,7 +276,7 @@ if not st.session_state["authenticated"]:
             st.error("Invalid credentials")
     st.stop()   # prevent the rest of the app from rendering
 
-# Ensure FRACTO_API_KEY is available for mcc.call_fracto
+# Ensure FRACTO_API_KEY is available for API calls
 if "FRACTO_API_KEY" in st.secrets:
     os.environ["FRACTO_API_KEY"] = st.secrets["FRACTO_API_KEY"]
 
@@ -298,6 +299,12 @@ st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 st.markdown("## Smart‑OCR to ERP‑ready Excel")
 
 st.markdown('<h3 id="upload">1. Upload and process your PDF</h3>', unsafe_allow_html=True)
+
+# Output mode toggle — default to Statements Excel (like CLI third pass)
+use_statements_mode = st.checkbox(
+    "Statements Excel (like CLI third pass)", value=True,
+    help="Generates the same multi-sheet workbook grouped by document type. Uncheck to use a single-sheet format from mapping.yaml."
+)
 
 # ── Upload & Process ──────────────────────────────────────────
 # Upload widget
@@ -333,10 +340,12 @@ for col in manual_fields:
     else:
         manual_inputs[col] = val  # Excel overrides
 
-# Formats come straight from mapping.yaml ("Format 1", "Format 2", …)
-format_names = list(FORMATS.keys())
-selected_format_key = st.selectbox("Select Excel output format", format_names)
-selected_format_cfg = FORMATS[selected_format_key]
+selected_format_cfg = None
+if not use_statements_mode:
+    # Formats come straight from mapping.yaml ("Format 1", "Format 2", …)
+    format_names = list(FORMATS.keys())
+    selected_format_key = st.selectbox("Select Excel output format", format_names)
+    selected_format_cfg = FORMATS[selected_format_key]
 
 # Process button
 run = st.button("⚙️ Process PDF", disabled=pdf_file is None)
@@ -354,22 +363,44 @@ if run:
             pdf_bytes = stamp_job_number(pdf_bytes, job_no)
         progress.progress(0.4)
 
-        results = call_fracto_parallel(pdf_bytes, pdf_file.name)
-        progress.progress(0.8)
-
-        buffer = io.BytesIO()
-        write_excel_from_ocr(
-            results,
-            buffer,
-            overrides=manual_inputs,
-            mappings=selected_format_cfg["mappings"],
-            template_path=selected_format_cfg.get("template_path"),
-            sheet_name=selected_format_cfg.get("sheet_name"),
-        )
-        progress.progress(1.0, text="Done!")
-        st.session_state["excel_bytes"]   = buffer.getvalue()
+        excel_bytes = None
         base_name = Path(pdf_file.name).stem
-        st.session_state["excel_filename"] = f"{base_name}_ocr.xlsx"
+
+        if use_statements_mode:
+            progress.progress(0.6, text="Grouping by document type…")
+            excel_bytes = generate_statements_excel(pdf_bytes, pdf_file.name)
+
+        if excel_bytes is None:
+            # Fallback to single-sheet mapping export
+            progress.progress(0.6, text="Extracting rows (single-sheet)…")
+            results = call_fracto_parallel(pdf_bytes, pdf_file.name)
+            progress.progress(0.8)
+
+            buffer = io.BytesIO()
+            # Pick a default format if none was selected (e.g., checkbox toggled mid-run)
+            if selected_format_cfg is None:
+                if FORMATS:
+                    default_key = next(iter(FORMATS))
+                    selected_format_cfg = FORMATS[default_key]
+                else:
+                    selected_format_cfg = {"mappings": {}, "template_path": None, "sheet_name": None}
+
+            write_excel_from_ocr(
+                results,
+                buffer,
+                overrides=manual_inputs,
+                mappings=selected_format_cfg.get("mappings", {}),
+                template_path=selected_format_cfg.get("template_path"),
+                sheet_name=selected_format_cfg.get("sheet_name"),
+            )
+            excel_bytes = buffer.getvalue()
+            final_name = f"{base_name}_ocr.xlsx"
+        else:
+            final_name = f"{base_name}_statements.xlsx"
+
+        progress.progress(1.0, text="Done!")
+        st.session_state["excel_bytes"]   = excel_bytes
+        st.session_state["excel_filename"] = final_name
         st.toast("✅ Excel generated!", icon="🎉")
     except Exception as exc:
         st.toast(f"❌ Error: {exc}", icon="⚠️")
