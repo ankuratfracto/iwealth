@@ -166,13 +166,13 @@ def stamp_job_number(src_bytes: bytes, job_no: str, margin: int = 20) -> bytes:
 # ─── CONFIG ──────────────────────────────────────────────────────────────
 FRACTO_ENDPOINT = "https://prod-ml.fracto.tech/upload-file-smart-ocr"
 API_KEY         = os.getenv("FRACTO_API_KEY", "KUS-KUS-D09D77-709841-JXR4YETC")
-PARSER_APP_ID   = "5cbrRgZzNcY3pP4O"
-#
+PARSER_APP_ID   = "WBBIOMVDWvEAUGoe" #"5cbrRgZzNcY3pP4O"
+
 # Use a separate parser for the second‑pass (selected pages) OCR
 SECOND_PARSER_APP_ID = os.getenv("FRACTO_SECOND_PARSER_ID", "uiV9gO66OweRG6kY")
 
 # Third‑pass parser (grouped by doc_type)
-THIRD_PARSER_APP_ID = os.getenv("FRACTO_THIRD_PARSER_ID", "dHbxlm0iggBuFgEZ")
+THIRD_PARSER_APP_ID = os.getenv("FRACTO_THIRD_PARSER_ID", "ft0CicYHxV6UwAfD")# "dHbxlm0iggBuFgEZ")
 
 # gagan's parser for pnl extraction - dHbxlm0iggBuFgEZ
 
@@ -193,9 +193,13 @@ EXTRA_ACCURACY_THIRD  = os.getenv("FRACTO_EXTRA_ACCURACY_THIRD",  "true")
 # 👉 Mark your parser IDs per doc_type here (and they will also show in the Excel "Routing Summary" sheet).
 # To include the "Routing Summary" sheet, set FRACTO_INCLUDE_ROUTING_SUMMARY=true (it's off by default).
 DOC_TYPE_ROUTING: dict[str, dict] = {
-    # Example:
-    # "bank statement": {"parser": "aaaaBBBBccccDDDD", "model": "gv1", "extra": "true"},
-    # "credit card statement": {"parser": "eeeeFFFFggggHHHH", "model": "gv1", "extra": "true"},
+    # ↓ Keys are lower‑cased canonical doc_type strings (post‑normalisation).
+    "consolidated balance sheet":            {"parser": "ft0CicYHxV6UwAfD", "model": THIRD_MODEL_ID, "extra": EXTRA_ACCURACY_THIRD},
+    "standalone balance sheet":              {"parser": "um9PHXOaBHZlUfW2", "model": THIRD_MODEL_ID, "extra": EXTRA_ACCURACY_THIRD},
+    "consolidated profit and loss statement":{"parser": "hBrZDi7IZRHlQkoO", "model": THIRD_MODEL_ID, "extra": EXTRA_ACCURACY_THIRD},
+    "standalone profit and loss statement":  {"parser": "xnZ211ZGmuievWpB", "model": THIRD_MODEL_ID, "extra": EXTRA_ACCURACY_THIRD},
+    "consolidated cashflow":                 {"parser": "fzrdQfadMBM4DeQn", "model": THIRD_MODEL_ID, "extra": EXTRA_ACCURACY_THIRD},
+    "standalone cashflow":                   {"parser": "9L37T6iifrC3uKT9", "model": THIRD_MODEL_ID, "extra": EXTRA_ACCURACY_THIRD},
 }
 # Merge optional JSON from env var (silently ignore if invalid)
 try:
@@ -219,6 +223,236 @@ def _resolve_routing(doc_type: str) -> tuple[str, str, str]:
         return parser, model, extra
     return THIRD_PARSER_APP_ID, THIRD_MODEL_ID, EXTRA_ACCURACY_THIRD
 
+# ─── Doc-type normalisation & page-text heuristics ────────────────────────
+import re
+
+def _canon_text(s: str) -> str:
+    """Lowercase + collapse whitespace for robust matching."""
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+_DOC_NORMALISATIONS: list[tuple[str, str]] = [
+    (r"^consolidated.*balance.*", "Consolidated Balance Sheet"),
+    (r"^standalone.*balance.*", "Standalone Balance Sheet"),
+    (r"statement of assets and liabilities", "Standalone Balance Sheet"),
+    (r"^consolidated.*(profit).*(loss)", "Consolidated Profit and Loss Statement"),
+    (r"^standalone.*(profit).*(loss)", "Standalone Profit and Loss Statement"),
+    (r"(statement of profit).*(loss)", "Standalone Profit and Loss Statement"),
+    (r"^consolidated.*cash.*flow", "Consolidated Cashflow"),
+    (r"^standalone.*cash.*flow", "Standalone Cashflow"),
+    (r"cash\s*flow", "Standalone Cashflow"),
+]
+
+def normalize_doc_type(label: str | None) -> str:
+    """Map a variety of labels/synonyms to a canonical sheet name."""
+    s = _canon_text(label or "")
+    if not s:
+        return "Others"
+    for pat, out in _DOC_NORMALISATIONS:
+        if re.search(pat, s):
+            return out
+    return (label or "Others").strip().title()
+
+def extract_page_texts_from_pdf_bytes(pdf_bytes: bytes) -> list[str]:
+    """Return plain text per page using PyPDF2's extract_text (best-effort)."""
+    texts: list[str] = []
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        for p in reader.pages:
+            try:
+                t = p.extract_text() or ""
+            except Exception:
+                t = ""
+            texts.append(t)
+    except Exception:
+        pass
+    return texts
+
+def infer_doc_type_from_text(text: str) -> str | None:
+    """
+    Heuristically infer the statement type from visible page text.
+    Returns a canonical doc_type or None.
+    """
+    s = _canon_text(text)
+    if not s:
+        return None
+    is_cons  = "consolidated" in s
+    is_stand = "standalone" in s and not is_cons
+    base: str | None = None
+    if ("cash flow" in s) or ("cashflows" in s) or ("cash flows" in s) or ("operating activities" in s and "cash" in s):
+        base = "Cashflow"
+    elif ("statement of assets and liabilities" in s) or ("balance sheet" in s):
+        base = "Balance Sheet"
+    elif ("statement of profit and loss" in s) or ("profit before" in s) or ("revenue from operations" in s):
+        base = "Profit and Loss Statement"
+    if not base:
+        return None
+    prefix = "Consolidated " if is_cons and not is_stand else ("Standalone " if is_stand else "")
+    return f"{prefix}{base}".strip()
+
+def expand_selected_pages(selected_pages: list[int], total_pages: int, radius: int = 1) -> list[int]:
+    """
+    Be forgiving: include ±radius neighbour pages so we don't miss 'continued' pages
+    that were misclassified as 'Others' in the first pass.
+    """
+    if not selected_pages:
+        return list(range(1, total_pages + 1))  # fallback: include all pages
+    include = set(selected_pages)
+    for p in selected_pages:
+        for d in range(1, radius + 1):
+            if p - d >= 1:
+                include.add(p - d)
+            if p + d <= total_pages:
+                include.add(p + d)
+    return sorted(include)
+
+def build_groups(selected_pages: list[int], classification: list[dict], original_pdf_bytes: bytes) -> dict[str, list[int]]:
+    """
+    Build {doc_type -> [original_page_numbers]} using:
+      • second-pass classification (page_wise_classification)
+      • page-text heuristics to override obviously wrong labels
+      • smoothing to pull 'Others' pages that sit between same-type pages
+    Any leftover 'Others' pages are dropped.
+    """
+    # 1) Start with whatever the classifier returned, honoring continuations.
+    doc_by_page: dict[int, str] = {}
+    for item in classification or []:
+        sel_no = item.get("page_number")
+        # Prefer explicit doc_type; otherwise if this row marks a continuation, inherit label
+        is_cont = str(item.get("is_continuation", "")).lower() == "true"
+        dt_raw = item.get("doc_type") or (item.get("continuation_of") if is_cont else None)
+        dt = normalize_doc_type(dt_raw)
+        if isinstance(sel_no, int):
+            if 1 <= sel_no <= len(selected_pages):
+                orig = selected_pages[sel_no - 1]
+            else:
+                orig = sel_no
+            doc_by_page[orig] = dt
+
+    # 2) Ensure every selected page is present; use header heuristics if needed.
+    page_texts = extract_page_texts_from_pdf_bytes(original_pdf_bytes)
+    for orig in selected_pages:
+        inferred = infer_doc_type_from_text(page_texts[orig - 1] if 0 <= orig - 1 < len(page_texts) else "")
+        if inferred:
+            inferred = normalize_doc_type(inferred)
+        if orig not in doc_by_page:
+            doc_by_page[orig] = inferred or "Others"
+        else:
+            # If classifier says Balance Sheet but header screams Cashflow (or vice-versa), trust header.
+            current = _canon_text(doc_by_page[orig])
+            if inferred and _canon_text(inferred) not in (current,):
+                kinds = lambda s: ("cash" if "cash" in s else "pl" if "loss" in s or "profit" in s else "bs" if "balance" in s or "assets" in s else "other")
+                if kinds(current) != kinds(_canon_text(inferred)):
+                    doc_by_page[orig] = inferred
+
+    # 3) Absorb 'Others' between same-type pages
+    pages_sorted = sorted(doc_by_page)
+    for p in pages_sorted:
+        if doc_by_page[p] == "Others":
+            prev_dt = None
+            for q in range(p - 1, 0, -1):
+                if q in doc_by_page and doc_by_page[q] != "Others":
+                    prev_dt = doc_by_page[q]
+                    break
+            next_dt = None
+            for q in range(p + 1, len(page_texts) + 1):
+                if q in doc_by_page and doc_by_page[q] != "Others":
+                    next_dt = doc_by_page[q]
+                    break
+            if prev_dt and next_dt and prev_dt == next_dt:
+                doc_by_page[p] = prev_dt
+            elif prev_dt and not next_dt:
+                doc_by_page[p] = prev_dt
+            elif next_dt and not prev_dt:
+                doc_by_page[p] = next_dt
+
+    # 4) Groups (primary)
+    groups: dict[str, list[int]] = {}
+    for p in sorted(doc_by_page):
+        dt = doc_by_page[p]
+        if dt == "Others":
+            continue
+        groups.setdefault(dt, []).append(p)
+
+    # 5) Include secondary classifications when the second parser flags two sections on one page.
+    #    Accept common key variants for resilience.
+    for item in classification or []:
+        sel_no = item.get("page_number")
+        if not isinstance(sel_no, int):
+            continue
+        # Map selected.pdf index back to original page number
+        if 1 <= sel_no <= len(selected_pages):
+            orig = selected_pages[sel_no - 1]
+        else:
+            orig = sel_no
+
+        second_dt_raw = (
+            item.get("second_doc_type")
+            or item.get("Second_doc_type")
+            or item.get("second_type")
+            or item.get("secondDocType")
+            or ""
+        )
+        second_dt = normalize_doc_type(second_dt_raw)
+        if second_dt and second_dt != "Others":
+            lst = groups.setdefault(second_dt, [])
+            if orig not in lst:
+                lst.append(orig)
+
+    return groups
+
+def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
+    """
+    Light-weight cleanups to match human expectations:
+      • Merge '(Not annualised)' style notes into the 'particulars' text instead of a separate column.
+      • Clear duplicate numbers copied onto the row just above a 'Total ...' line.
+    """
+    import pandas as pd  # lazy import
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+
+    # 1) Merge notes into particulars when they contain 'annualis...'
+    part_col = next((c for c in out.columns if str(c).strip().lower() in {"particulars", "particular", "description", "line item", "line_item"}), None)
+    note_col = next((c for c in out.columns if str(c).strip().lower() in {"note", "notes", "remark", "remarks"}), None)
+    if part_col and note_col:
+        mask = out[note_col].astype(str).str.contains("annualis", case=False, na=False)
+        if mask.any():
+            out.loc[mask, part_col] = (
+                out.loc[mask, part_col].fillna("").astype(str).str.rstrip()
+                + " (" + out.loc[mask, note_col].astype(str).str.strip() + ")"
+            ).str.replace(r"\s+", " ", regex=True)
+            # Clear the merged notes
+            out.loc[mask, note_col] = ""
+        # Drop an entirely empty notes column, if any
+        if out[note_col].astype(str).str.strip().eq("").all():
+            out = out.drop(columns=[note_col])
+
+    # 2) Clear duplicate values on the row just above a 'Total ...' line
+    if part_col:
+        is_total = out[part_col].astype(str).str.contains(r"\btotal\b", case=False, na=False)
+        num_cols = [c for c in out.columns if c != part_col and pd.to_numeric(out[c], errors="coerce").notna().any()]
+        for idx in out.index[is_total]:
+            pos = out.index.get_loc(idx)
+            if pos == 0:
+                continue
+            prev_idx = out.index[pos - 1]
+            # If every numeric cell equals the total row below, blank the previous row's numbers
+            duplicate_all = True
+            for c in num_cols:
+                a = pd.to_numeric(out.at[prev_idx, c], errors="coerce")
+                b = pd.to_numeric(out.at[idx, c], errors="coerce")
+                if pd.isna(a) and pd.isna(b):
+                    continue
+                if (pd.isna(a) and not pd.isna(b)) or (not pd.isna(a) and pd.isna(b)) or (a != b):
+                    duplicate_all = False
+                    break
+            if duplicate_all:
+                for c in num_cols:
+                    out.at[prev_idx, c] = None
+
+    return out
 # ──────────────────────────────────────────────────────────────────────────
 
 logger = logging.getLogger("FractoPageOCR")
@@ -441,16 +675,17 @@ def _cli():
         logger.info("Second pass: re‑processing %d selected pages %s",
                     len(selected_pages), selected_pages)
 
-        # 4️⃣ Assemble those pages into a single in‑memory PDF
+        # 4️⃣ Assemble those pages into a single in‑memory PDF (and keep original bytes for grouping)
         with open(pdf_path, "rb") as fh:
-            reader = PdfReader(fh)
-            writer = PdfWriter()
-            for pno in selected_pages:
-                writer.add_page(reader.pages[pno - 1])
-            buf = io.BytesIO()
-            writer.write(buf)
-            buf.seek(0)
-            selected_bytes = buf.getvalue()
+            orig_bytes = fh.read()
+        reader = PdfReader(io.BytesIO(orig_bytes))
+        writer = PdfWriter()
+        for pno in selected_pages:
+            writer.add_page(reader.pages[pno - 1])
+        buf = io.BytesIO()
+        writer.write(buf)
+        buf.seek(0)
+        selected_bytes = buf.getvalue()
 
         # 5️⃣ Second‑pass upload
         stem = Path(pdf_path).stem
@@ -490,23 +725,17 @@ def _cli():
             ]
         if classification:
             try:
-                _unique_types = sorted({(it.get("doc_type") or "").strip() for it in classification if it.get("doc_type")})
-                logger.info("Third pass: %d unique doc types detected → %s", len(_unique_types), _unique_types)
+                _unique_types = sorted({
+                    (it.get("doc_type") or it.get("continuation_of") or "").strip()
+                    for it in classification
+                    if (it.get("doc_type") or it.get("continuation_of"))
+                })
+                logger.info("Third pass: %d unique doc types detected (pre-smoothing) → %s", len(_unique_types), _unique_types)
             except Exception:
                 pass
-            # Build mapping: doc_type → list[original_page_number]
-            groups: dict[str, list[int]] = {}
-            for item in classification:
-                doc_type   = item.get("doc_type")
-                sel_pageno = item.get("page_number")  # may be 1‑based inside selected.pdf OR original page no.
-                if doc_type and isinstance(sel_pageno, int):
-                    if 1 <= sel_pageno <= len(selected_pages):
-                        # Treat as index inside selected.pdf → map back to original
-                        orig_pageno = selected_pages[sel_pageno - 1]
-                    else:
-                        # Treat as original page number already
-                        orig_pageno = sel_pageno
-                    groups.setdefault(doc_type, []).append(orig_pageno)
+
+            # Robust grouping: use our mixed-page + continuation aware helper
+            groups = build_groups(selected_pages, classification, orig_bytes)
 
             if groups:
                 _t2 = time.time()
@@ -518,86 +747,88 @@ def _cli():
                 routing_used: dict[str, dict] = {}
 
                 # Concurrent upload of each doc_type group (limit = MAX_PARALLEL)
-                with open(pdf_path, "rb") as fh:
-                    reader = PdfReader(fh)
-                    futures = {}
+                reader = PdfReader(io.BytesIO(orig_bytes))
+                futures = {}
 
-                    from concurrent.futures import ThreadPoolExecutor, as_completed
-                    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(groups))) as pool:
-                        for doc_type, page_list in groups.items():
-                            # Preserve original order
-                            page_list = sorted(page_list)
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(groups))) as pool:
+                    for doc_type, page_list in groups.items():
+                        # Preserve original order
+                        page_list = sorted(page_list)
 
-                            writer = PdfWriter()
-                            for pno in page_list:
-                                writer.add_page(reader.pages[pno - 1])
+                        writer = PdfWriter()
+                        for pno in page_list:
+                            writer.add_page(reader.pages[pno - 1])
 
-                            buf = io.BytesIO()
-                            writer.write(buf)
-                            buf.seek(0)
-                            group_bytes = buf.getvalue()
+                        buf = io.BytesIO()
+                        writer.write(buf)
+                        buf.seek(0)
+                        group_bytes = buf.getvalue()
 
-                            # Slug for filenames
-                            slug = (
-                                doc_type.lower()
-                                .replace(" ", "_")
-                                .replace("&", "and")
-                                .replace("/", "_")
-                            )
-                            group_pdf_name  = f"{stem}_{slug}.pdf"
-                            group_json_path = Path(pdf_path).with_name(f"{stem}_{slug}_ocr.json")
+                        # Slug for filenames
+                        slug = (
+                            doc_type.lower()
+                            .replace(" ", "_")
+                            .replace("&", "and")
+                            .replace("/", "_")
+                        )
+                        group_pdf_name  = f"{stem}_{slug}.pdf"
+                        group_json_path = Path(pdf_path).with_name(f"{stem}_{slug}_ocr.json")
 
-                            parser_app, model_id, extra_acc = _resolve_routing(doc_type)
-                            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
-                            fut = pool.submit(
-                                call_fracto,
-                                group_bytes,
-                                group_pdf_name,
-                                parser_app=parser_app,
-                                model=model_id,
-                                extra_accuracy=extra_acc,
-                            )
-                            futures[fut] = (doc_type, group_json_path)
+                        parser_app, model_id, extra_acc = _resolve_routing(doc_type)
+                        routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
+                        fut = pool.submit(
+                            call_fracto,
+                            group_bytes,
+                            group_pdf_name,
+                            parser_app=parser_app,
+                            model=model_id,
+                            extra_accuracy=extra_acc,
+                        )
+                        futures[fut] = (doc_type, group_json_path)
 
-                        for fut in as_completed(futures):
-                            doc_type, group_json_path = futures[fut]
+                    for fut in as_completed(futures):
+                        doc_type, group_json_path = futures[fut]
+                        try:
+                            group_res = fut.result()
+                            with open(group_json_path, "w", encoding="utf-8") as fh:
+                                json.dump(group_res, fh, indent=2)
+                            logger.info("Third-pass (%s) results written to %s", doc_type, group_json_path)
+                            #  ── Collect DataFrame for combined Excel ──
                             try:
-                                group_res = fut.result()
-                                with open(group_json_path, "w", encoding="utf-8") as fh:
-                                    json.dump(group_res, fh, indent=2)
-                                logger.info("Third-pass (%s) results written to %s", doc_type, group_json_path)
-                                #  ── Collect DataFrame for combined Excel ──
-                                try:
-                                    parsed = group_res.get("data", {}).get("parsedData", [])
-                                    if isinstance(parsed, list) and parsed:
-                                        # Collect union of keys across all rows to maintain column order
-                                        all_keys = []
-                                        for row in parsed:
-                                            for k in row.keys():
-                                                if k not in all_keys:
-                                                    all_keys.append(k)
-                                        rows = [{k: r.get(k, "") for k in all_keys} for r in parsed]
+                                parsed = group_res.get("data", {}).get("parsedData", [])
+                                rows_list = _extract_rows(parsed)
+                                if rows_list:
+                                    # Collect union of keys across all rows to maintain column order
+                                    all_keys = []
+                                    for row in rows_list:
+                                        for k in row.keys():
+                                            if k not in all_keys:
+                                                all_keys.append(k)
+                                    rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
 
-                                        import pandas as pd
-                                        df = pd.DataFrame(rows, columns=all_keys)
-                                        for col in df.columns:
-                                            series = df[col].replace("", pd.NA)
-                                            conv = pd.to_numeric(series, errors="coerce")
-                                            if conv.isna().eq(series.isna()).all():
-                                                df[col] = conv
+                                    import pandas as pd
+                                    df = pd.DataFrame(rows, columns=all_keys)
+                                    # numeric coercion (keep blanks)
+                                    for col in df.columns:
+                                        series = df[col].replace("", pd.NA)
+                                        conv = pd.to_numeric(series, errors="coerce")
+                                        if conv.isna().eq(series.isna()).all():
+                                            df[col] = conv
 
-                                        combined_sheets[doc_type] = df  # store for final workbook
-                                except Exception as exc:
-                                    logger.error("Excel generation for %s failed: %s", doc_type, exc)
+                                    df = sanitize_statement_df(doc_type, df)
+                                    combined_sheets[doc_type] = df  # store for final workbook
                             except Exception as exc:
-                                logger.error("Third-pass (%s) failed: %s", doc_type, exc)
+                                logger.error("Excel generation for %s failed: %s", doc_type, exc)
+                        except Exception as exc:
+                            logger.error("Third-pass (%s) failed: %s", doc_type, exc)
 
-                    # After all futures, log routing summary
-                    try:
-                        _rlog = {dt: routing_used[dt].get("parser_app") for dt in sorted(routing_used)}
-                        logger.info("Third pass routing summary (doc_type → parser_app): %s", _rlog)
-                    except Exception:
-                        pass
+                # After all futures, log routing summary
+                try:
+                    _rlog = {dt: routing_used[dt].get("parser_app") for dt in sorted(routing_used)}
+                    logger.info("Third pass routing summary (doc_type → parser_app): %s", _rlog)
+                except Exception:
+                    pass
 
                     # ── Write a single workbook with each doc_type on its own sheet ──
                     if combined_sheets:
@@ -849,6 +1080,144 @@ def write_excel_from_ocr(
         written,
         len(headers),
     )
+
+def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes | None:
+    """
+    Robust multi-sheet workbook creator:
+      • 1st pass (per-page) to shortlist pages
+      • Expand selection by ±1 neighbour page to catch 'continued' pages
+      • 2nd pass to classify
+      • Header-based heuristics + smoothing to fix obviously wrong labels / 'Others'
+      • 3rd pass per doc_type; each statement in its own sheet
+    Returns workbook bytes or None.
+    """
+    # 1) First pass
+    results = call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=EXTRA_ACCURACY_FIRST)
+
+    total_pages = len(results) if results else 0
+    selected_pages = [
+        idx + 1
+        for idx, res in enumerate(results or [])
+        if (res.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "Others").strip().lower() != "others"
+    ]
+    # Be lenient: include neighbours so we don't miss page-2 of P&L/Cashflow
+    selected_pages = expand_selected_pages(selected_pages, total_pages, radius=1)
+    if not selected_pages:
+        return None
+
+    # Build selected.pdf
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    w = PdfWriter()
+    for pno in selected_pages:
+        w.add_page(reader.pages[pno - 1])
+    tmp = io.BytesIO(); w.write(tmp); tmp.seek(0)
+    selected_bytes = tmp.getvalue()
+
+    # 2) Second pass
+    stem = Path(original_filename).stem
+    second_res = call_fracto(
+        selected_bytes,
+        f"{stem}_selected.pdf",
+        parser_app=SECOND_PARSER_APP_ID,
+        model=SECOND_MODEL_ID,
+        extra_accuracy=EXTRA_ACCURACY_SECOND,
+    )
+
+    # 3) Classification (with fallback)
+    classification = (
+        second_res.get("data", {}).get("parsedData", {}).get("page_wise_classification", [])
+        if isinstance(second_res, dict) else []
+    ) or []
+    if not classification:
+        classification = [
+            {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
+            for i, r in enumerate(results or [])
+            if (r.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "Others").strip().lower() != "others"
+        ]
+        classification = [it for it in classification if (it["page_number"] in selected_pages)]
+    groups = build_groups(selected_pages, classification, pdf_bytes)
+    if not groups:
+        return None
+
+    # 4) Third pass per group (sequential to be Cloud-friendly)
+    import pandas as pd
+    combined_sheets: dict[str, pd.DataFrame] = {}
+    routing_used: dict[str, dict] = {}
+
+    for doc_type, page_list in groups.items():
+        page_list = sorted(page_list)
+        gw = PdfWriter()
+        for pno in page_list:
+            gw.add_page(reader.pages[pno - 1])
+        b = io.BytesIO(); gw.write(b); b.seek(0)
+        group_bytes = b.getvalue()
+
+        parser_app, model_id, extra_acc = _resolve_routing(doc_type)
+        routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
+
+        group_res = call_fracto(
+            group_bytes,
+            f"{stem}_{doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')}.pdf",
+            parser_app=parser_app,
+            model=model_id,
+            extra_accuracy=extra_acc,
+        )
+        parsed = group_res.get("data", {}).get("parsedData", [])
+        if isinstance(parsed, list) and parsed:
+            all_keys = []
+            for row in parsed:
+                for k in row.keys():
+                    if k not in all_keys:
+                        all_keys.append(k)
+            rows = [{k: r.get(k, "") for k in all_keys} for r in parsed]
+            df = pd.DataFrame(rows, columns=all_keys)
+            # Light cleanups
+            df = sanitize_statement_df(doc_type, df)
+            combined_sheets[doc_type] = df
+
+    if not combined_sheets:
+        return None
+
+    # 5) Write workbook to bytes (styled)
+    out_buf = io.BytesIO()
+    with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
+        for sheet_name, df in combined_sheets.items():
+            safe = sheet_name[:31] or "Sheet"
+            df.to_excel(writer, sheet_name=safe, index=False)
+            ws = writer.book[safe]
+            header_font  = Font(bold=True, color="FFFFFF")
+            header_fill  = PatternFill("solid", fgColor="305496")
+            header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
+            max_width = 60
+            for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
+                longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+                width = min(max(longest + 2, 10), max_width)
+                ws.column_dimensions[col[0].column_letter].width = width
+                for c in col[1:]:
+                    c.alignment = Alignment(vertical="top", wrap_text=True)
+            for cell in ws[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_align
+            ws.freeze_panes = "A2"
+
+        # Optional routing summary
+        include_summary = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
+        if include_summary and routing_used:
+            rows = []
+            for dt in sorted(routing_used):
+                cfg = routing_used[dt]
+                rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra",""))])
+            pd.DataFrame(rows, columns=["Doc Type","Parser App ID","Model","Extra Accuracy"]).to_excel(writer, sheet_name="Routing Summary", index=False)
+            ws = writer.book["Routing Summary"]
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="305496")
+                cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+            ws.freeze_panes = "A2"
+
+    out_buf.seek(0)
+    return out_buf.getvalue()
 
 def _renumber_serials(results: list[dict],
                       json_field: str = "Serial_Number",

@@ -68,17 +68,8 @@ if generate_statements_excel is None:
         if not classification:
             return None
 
-        # 5) Group doc_type → original page numbers
-        groups: dict[str, list[int]] = {}
-        for item in classification:
-            doc_type   = item.get("doc_type")
-            sel_pageno = item.get("page_number")
-            if doc_type and isinstance(sel_pageno, int):
-                if 1 <= sel_pageno <= len(selected_pages):
-                    orig_pageno = selected_pages[sel_pageno - 1]
-                else:
-                    orig_pageno = sel_pageno
-                groups.setdefault(doc_type, []).append(orig_pageno)
+        # 5) Group pages by doc_type (robust: classification + header heuristics + smoothing + dual-sections)
+        groups = _mcc_mod.build_groups(selected_pages, classification, pdf_bytes)
         if not groups:
             return None
 
@@ -104,13 +95,16 @@ if generate_statements_excel is None:
                 extra_accuracy=extra_acc,
             )
             parsed = group_res.get("data", {}).get("parsedData", [])
-            if isinstance(parsed, list) and parsed:
+            rows_list = _mcc_mod._extract_rows(parsed)
+            if rows_list:
                 all_keys = []
-                for row in parsed:
+                for row in rows_list:
                     for k in row.keys():
-                        if k not in all_keys: all_keys.append(k)
-                rows = [{k: r.get(k, "") for k in all_keys} for r in parsed]
+                        if k not in all_keys: 
+                            all_keys.append(k)
+                rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                 df = _pd.DataFrame(rows, columns=all_keys)
+                df = _mcc_mod.sanitize_statement_df(doc_type, df)
                 combined_sheets[doc_type] = df
 
         if not combined_sheets:
@@ -179,8 +173,9 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         if res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
     ]
     if not selected_pages:
-        status_write("⚠️ No classified pages (all 'Others'). Skipping 2nd/3rd pass.")
-        return None
+        status_write("⚠️ No classified pages (all 'Others') — including the whole file for a careful second pass.")
+    # Include neighbours (±1) so we don’t miss continued pages
+    selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=1)
 
     # Build selected.pdf
     reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -220,17 +215,8 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         status_write("⚠️ Could not derive classification — aborting third pass.")
         return None
 
-    # 5) Group pages by doc_type (map back to original page numbers)
-    groups: dict[str, list[int]] = {}
-    for item in classification:
-        doc_type   = item.get("doc_type")
-        sel_pageno = item.get("page_number")
-        if doc_type and isinstance(sel_pageno, int):
-            if 1 <= sel_pageno <= len(selected_pages):
-                orig_pageno = selected_pages[sel_pageno - 1]
-            else:
-                orig_pageno = sel_pageno
-            groups.setdefault(doc_type, []).append(orig_pageno)
+    # 5) Group pages by doc_type (robust: classification + header heuristics + smoothing)
+    groups = _mcc_mod.build_groups(selected_pages, classification, pdf_bytes)
     if not groups:
         status_write("⚠️ No groups found after classification.")
         return None
@@ -281,14 +267,16 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 progress.progress(0.55 + 0.40 * (completed / total), text=f"Third pass {completed}/{total}: {doc_type}")
 
             parsed = group_res.get("data", {}).get("parsedData", [])
-            if isinstance(parsed, list) and parsed:
+            rows_list = _mcc_mod._extract_rows(parsed)
+            if rows_list:
                 all_keys = []
-                for row in parsed:
+                for row in rows_list:
                     for k in row.keys():
                         if k not in all_keys:
                             all_keys.append(k)
-                rows = [{k: r.get(k, "") for k in all_keys} for r in parsed]
+                rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                 df_ = pd.DataFrame(rows, columns=all_keys)
+                df_ = _mcc_mod.sanitize_statement_df(doc_type, df_)
                 combined_sheets[doc_type] = df_
 
     if not combined_sheets:
