@@ -1,0 +1,395 @@
+{
+  "file": "Karurvyasya_standalone_cashflow.pdf",
+  "status": "ok",
+  "data": {
+    "job_id": 2147622664,
+    "job_status": "success",
+    "parsedData": {
+      "statement_type": "Cash flow statement",
+      "framework": "Ind AS, Schedule III, Division II",
+      "scope": "",
+      "meta": {
+        "company": {
+          "name": "THE KARUR VYSYA BANK LIMITED",
+          "cin": "L65110TN1916PLC001295",
+          "face_value_per_share": ""
+        },
+        "report": {
+          "title": "CASH FLOW STATEMENT",
+          "periodicity": "Annual",
+          "currency": "INR",
+          "unit_scale": "lakh",
+          "audited_level": "Audited",
+          "statement_date": "2025-03-31",
+          "fiscal_year_end_month": "March",
+          "notes": ""
+        },
+        "periods": [
+          {
+            "id": "c1",
+            "label": "Year ended 31-03-2025",
+            "start_date": "2024-04-01",
+            "end_date": "2025-03-31",
+            "role": "Current Period",
+            "is_cumulative": true,
+            "is_audited": true
+          },
+          {
+            "id": "c2",
+            "label": "Year ended 31-03-2024",
+            "start_date": "2023-04-01",
+            "end_date": "2024-03-31",
+            "role": "Previous Period",
+            "is_cumulative": true,
+            "is_audited": true
+          }
+        ]
+      },
+      "cash_flow_from/(used_in)_operating_activities": {
+        "sr_no": "",
+        "particulars": "Cash flow from/(used in) operating activities",
+        "c1": "448706",
+        "c2": "295406",
+        "c3": "",
+        "c4": "",
+        "breakup": [
+          {
+            "sr_no": "",
+            "particulars": "Net Profit as per Profit and Loss account",
+            "c1": "194164",
+            "c2": "160481",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Adjustments for",
+            "c1": "",
+            "c2": "",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Depreciation on Bank's property",
+            "c1": "11373",
+            "c2": "10026",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Interest paid on TIER II bonds",
+            "c1": "5501",
+            "c2": "",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provisions for other contingencies",
+            "c1": "11785",
+            "c2": "10842",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for taxes",
+            "c1": "64909",
+            "c2": "49538",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for depreciation on investment",
+            "c1": "(25461)",
+            "c2": "",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for standard assets",
+            "c1": "3995",
+            "c2": "4474",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for bad and doubtful debts",
+            "c1": "44040",
+            "c2": "42766",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for non performing investments",
+            "c1": "2340",
+            "c2": "14813",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for compensation absences",
+            "c1": "3130",
+            "c2": "7264",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for medical leave",
+            "c1": "1124",
+            "c2": "",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Amortization of premium paid on Held to Maturity (HTM) investments",
+            "c1": "8528",
+            "c2": "10362",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Provision for employees stock option plan / scheme",
+            "c1": "275",
+            "c2": "341",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "(Profit)/Loss on sale of fixed assets (net)",
+            "c1": "(306)",
+            "c2": "(783)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Operating profit before working capital changes",
+            "c1": "345357",
+            "c2": "290164",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Adjustments for working capital changes",
+            "c1": "",
+            "c2": "",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "(Increase)/Decrease in investments (excluding HTM investments)",
+            "c1": "52251",
+            "c2": "(232613)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "(Increase) / Decrease in advances",
+            "c1": "(1077642)",
+            "c2": "(1095896)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "(Increase)/Decrease in other assets",
+            "c1": "8812",
+            "c2": "(40565)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Increase (Decrease) in deposits",
+            "c1": "1296526",
+            "c2": "1247514",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Increase/(Decrease) in borrowings",
+            "c1": "(126137)",
+            "c2": "153333",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Increase/(Decrease) in other liabilities and provisions",
+            "c1": "1039",
+            "c2": "18969",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Total adjustments for working capital changes",
+            "c1": "500206",
+            "c2": "340906",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Direct taxes paid",
+            "c1": "(51500)",
+            "c2": "(45500)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Net cash flow (from)/ used in operating activities",
+            "c1": "448706",
+            "c2": "295406",
+            "c3": "",
+            "c4": ""
+          }
+        ]
+      },
+      "cash_flow_from_investing_activities": {
+        "sr_no": "",
+        "particulars": "Cash flow from investing activities",
+        "c1": "(215080)",
+        "c2": "(129648)",
+        "c3": "",
+        "c4": "",
+        "breakup": [
+          {
+            "sr_no": "",
+            "particulars": "Purchase of fixed assets",
+            "c1": "(17163)",
+            "c2": "(9810)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "(Increase)/Decrease in HTM investments",
+            "c1": "(198283)",
+            "c2": "(120621)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Sale of fixed assets / other assets",
+            "c1": "366",
+            "c2": "783",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Net cash flow from/ (used in) investing activities",
+            "c1": "(215080)",
+            "c2": "(129648)",
+            "c3": "",
+            "c4": ""
+          }
+        ]
+      },
+      "cash_flow_from_financing_activities": {
+        "sr_no": "",
+        "particulars": "Cash flow from financing activities",
+        "c1": "(18811)",
+        "c2": "(69414)",
+        "c3": "",
+        "c4": "",
+        "breakup": [
+          {
+            "sr_no": "",
+            "particulars": "Proceeds from share capital",
+            "c1": "15",
+            "c2": "46",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Proceeds from share premium",
+            "c1": "427",
+            "c2": "785",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Increase/(Decrease) in tier II bonds",
+            "c1": "",
+            "c2": "(48700)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Interest paid on tier II bonds",
+            "c1": "(5501)",
+            "c2": "(19253)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Dividend paid",
+            "c1": "(19253)",
+            "c2": "(16044)",
+            "c3": "",
+            "c4": ""
+          },
+          {
+            "sr_no": "",
+            "particulars": "Net cash flow from/ (used in) financing activities",
+            "c1": "(18811)",
+            "c2": "(69414)",
+            "c3": "",
+            "c4": ""
+          }
+        ]
+      },
+      "net_increase_decrease_in_cash_and_cash_equivalents": {
+        "sr_no": "",
+        "particulars": "Net Increase/(decrease) in cash & cash equivalents",
+        "c1": "214815",
+        "c2": "96344",
+        "c3": "",
+        "c4": ""
+      },
+      "cash_and_cash_equivalents_at_beginning_of_year": {
+        "sr_no": "",
+        "particulars": "Cash and cash equivalents at the beginning of the year",
+        "c1": "565857",
+        "c2": "469513",
+        "c3": "",
+        "c4": ""
+      },
+      "cash_and_cash_equivalents_at_end_of_year": {
+        "sr_no": "",
+        "particulars": "Cash and cash equivalents at the end of the year",
+        "c1": "780672",
+        "c2": "565857",
+        "c3": "",
+        "c4": ""
+      }
+    },
+    "totalAttempts": 1,
+    "total_pages": 2,
+    "initiated_at": 1756795743712
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "use_period_labels": true,
+  "periods_by_doc_labels": {
+    "Standalone Balance Sheet": {
+      "c1": "As on 31.03.2025",
+      "c2": "As on 31.03.2024"
+    },
+    "Standalone Cashflow": {
+      "c1": "Year ended 31-03-2025",
+      "c2": "Year ended 31-03-2024"
+    },
+    "Standalone Profit and Loss Statement": {
+      "c1": "Quarter ended 31-03-2025",
+      "c2": "Quarter ended 31-12-2024",
+      "c3": "Quarter ended 31-03-2024",
+      "c4": "Year ended 31-03-2025",
+      "c5": "Year ended 31-03-2024"
+    }
+  },
+  "sheets": {
+    "Consolidated Balance Sheet": {
+      "columns_before": [
+        "Particulars"
+      ],
+      "period_label_keys": [],
+      "rename_map": {},
+      "columns_after": [
+        "Particulars"
+      ],
+      "had_c_columns_before": false
+    },
+    "Consolidated Profit and Loss Statement": {
+      "columns_before": [
+        "Particulars"
+      ],
+      "period_label_keys": [],
+      "rename_map": {},
+      "columns_after": [
+        "Particulars"
+      ],
+      "had_c_columns_before": false
+    },
+    "Consolidated Cashflow": {
+      "columns_before": [
+        "Particulars"
+      ],
+      "period_label_keys": [],
+      "rename_map": {},
+      "columns_after": [
+        "Particulars"
+      ],
+      "had_c_columns_before": false
+    },
+    "Standalone Balance Sheet": {
+      "columns_before": [
+        "Particulars",
+        "sr_no",
+        "c1",
+        "c2",
+        "c3",
+        "c4"
+      ],
+      "period_label_keys": [
+        "c1",
+        "c2"
+      ],
+      "rename_map": {
+        "c1": "As on 31.03.2025",
+        "c2": "As on 31.03.2024"
+      },
+      "columns_after": [
+        "Particulars",
+        "sr_no",
+        "As on 31.03.2025",
+        "As on 31.03.2024",
+        "c3",
+        "c4"
+      ],
+      "had_c_columns_before": true
+    },
+    "Standalone Profit and Loss Statement": {
+      "columns_before": [
+        "Particulars",
+        "sr_no",
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5"
+      ],
+      "period_label_keys": [
+        "c1",
+        "c2",
+        "c3",
+        "c4",
+        "c5"
+      ],
+      "rename_map": {
+        "c1": "Quarter ended 31-03-2025",
+        "c2": "Quarter ended 31-12-2024",
+        "c3": "Quarter ended 31-03-2024",
+        "c4": "Year ended 31-03-2025",
+        "c5": "Year ended 31-03-2024"
+      },
+      "columns_after": [
+        "Particulars",
+        "sr_no",
+        "Quarter ended 31-03-2025",
+        "Quarter ended 31-12-2024",
+        "Quarter ended 31-03-2024",
+        "Year ended 31-03-2025",
+        "Year ended 31-03-2024"
+      ],
+      "had_c_columns_before": true
+    },
+    "Standalone Cashflow": {
+      "columns_before": [
+        "Particulars",
+        "sr_no",
+        "c1",
+        "c2",
+        "c3",
+        "c4"
+      ],
+      "period_label_keys": [
+        "c1",
+        "c2"
+      ],
+      "rename_map": {
+        "c1": "Year ended 31-03-2025",
+        "c2": "Year ended 31-03-2024"
+      },
+      "columns_after": [
+        "Particulars",
+        "sr_no",
+        "Year ended 31-03-2025",
+        "Year ended 31-03-2024",
+        "c3",
+        "c4"
+      ],
+      "had_c_columns_before": true
+    }
+  },
+  "sheet_order": [
+    "Consolidated Balance Sheet",
+    "Consolidated Profit and Loss Statement",
+    "Consolidated Cashflow",
+    "Standalone Balance Sheet",
+    "Standalone Profit and Loss Statement",
+    "Standalone Cashflow"
+  ]
+}

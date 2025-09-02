@@ -1,0 +1,226 @@
+[
+  {
+    "file": "Karurvyasya_page_1.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622647,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": false
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694782
+    }
+  },
+  {
+    "file": "Karurvyasya_page_2.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622653,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": false
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795695037
+    }
+  },
+  {
+    "file": "Karurvyasya_page_3.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622648,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": false
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694879
+    }
+  },
+  {
+    "file": "Karurvyasya_page_4.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622651,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": false
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694907
+    }
+  },
+  {
+    "file": "Karurvyasya_page_5.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622650,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": false
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694889
+    }
+  },
+  {
+    "file": "Karurvyasya_page_6.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622646,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694679
+    }
+  },
+  {
+    "file": "Karurvyasya_page_7.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622649,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694883
+    }
+  },
+  {
+    "file": "Karurvyasya_page_8.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622652,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694982
+    }
+  },
+  {
+    "file": "Karurvyasya_page_9.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622645,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795694678
+    }
+  },
+  {
+    "file": "Karurvyasya_page_10.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622656,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795700103
+    }
+  },
+  {
+    "file": "Karurvyasya_page_11.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622655,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795700080
+    }
+  },
+  {
+    "file": "Karurvyasya_page_12.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622657,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": false
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795700235
+    }
+  },
+  {
+    "file": "Karurvyasya_page_13.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622654,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795700277
+    }
+  },
+  {
+    "file": "Karurvyasya_page_14.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622660,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795700507
+    }
+  },
+  {
+    "file": "Karurvyasya_page_15.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622659,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": true
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795700503
+    }
+  },
+  {
+    "file": "Karurvyasya_page_16.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622658,
+      "job_status": "success",
+      "parsedData": {
+        "has_table": false
+      },
+      "totalAttempts": 1,
+      "total_pages": 1,
+      "initiated_at": 1756795700784
+    }
+  }
+]

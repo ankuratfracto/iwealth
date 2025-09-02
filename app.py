@@ -1,7 +1,6 @@
 # app.py
 
-
-# Ensure the latest mapping.yaml changes are picked up
+from __future__ import annotations
 import importlib, logging, a as _mcc_mod
 importlib.reload(_mcc_mod)
 from a import FORMATS     # refresh the constant after reload
@@ -24,17 +23,42 @@ if generate_statements_excel is None:
     from openpyxl.styles import Font as _Font, Alignment as _Alignment, PatternFill as _PatternFill
 
     def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes | None:  # type: ignore
+        from PyPDF2 import PdfReader, PdfWriter
+        def _is_true(x):
+            return str(x).strip().lower() in ("true", "1", "yes", "y")
         # 1) First pass
         results = _mcc_mod.call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=_mcc_mod.EXTRA_ACCURACY_FIRST)
 
-        # 2) Select non-"Others" pages
-        selected_pages = [
-            idx + 1
-            for idx, res in enumerate(results)
-            if res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
-        ]
+        # 2) Select pages where has_table=true (fallback to old logic if none)
+        def _get_has_table(res: dict) -> bool:
+            field = getattr(_mcc_mod, "HAS_TABLE_FIELD", "has_table")
+            pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
+            if isinstance(pdict, list):
+                for item in pdict:
+                    if isinstance(item, dict) and field in item:
+                        return _is_true(item.get(field))
+                return False
+            return _is_true(pdict.get(field))
+        selected_pages = [idx + 1 for idx, res in enumerate(results) if _get_has_table(res)]
+        # Optional neighbour expansion via env var (default 0 to keep it strict)
+        try:
+            _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", str(getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0))))
+        except Exception:
+            _radius = getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0)
+        selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=_radius)
         if not selected_pages:
-            return None
+            # Fallback: previous heuristic
+            selected_pages = [
+                idx + 1
+                for idx, res in enumerate(results)
+                if (
+                    res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
+                    or _is_true(res.get("data", {}).get("parsedData", {}).get("Has_multiple_sections"))
+                )
+            ]
+            selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=_radius)
+        if not selected_pages:
+            selected_pages = list(range(1, len(results) + 1))
 
         # Build selected-pages PDF for second pass
         orig_reader = PdfReader(_io.BytesIO(pdf_bytes))
@@ -46,30 +70,55 @@ if generate_statements_excel is None:
 
         # 3) Second pass
         stem = Path(original_filename).stem
+        sel_pdf_name = _mcc_mod.SELECTED_PDF_NAME_TMPL.format(stem=stem)
         second_res = _mcc_mod.call_fracto(
             selected_bytes,
-            f"{stem}_selected.pdf",
+            sel_pdf_name,
             parser_app=_mcc_mod.SECOND_PARSER_APP_ID,
             model=_mcc_mod.SECOND_MODEL_ID,
             extra_accuracy=_mcc_mod.EXTRA_ACCURACY_SECOND,
         )
 
         # 4) Classification (with fallback)
-        classification = (
-            second_res.get("data", {}).get("parsedData", {}).get("page_wise_classification", [])
-        )
-        if not classification:
-            classification = [
-                {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
-                for i, r in enumerate(results)
-                if r.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
-            ]
-            classification = [it for it in classification if (it["page_number"] in selected_pages)]
-        if not classification:
-            return None
+        pd_payload = (second_res.get("data", {}) or {}).get("parsedData", {})
+        classification = []
+        # Robust: accept either 'page_wise_classification' or 'classification'
+        if isinstance(pd_payload, dict):
+            classification = pd_payload.get("page_wise_classification") or pd_payload.get("classification") or []
+        elif isinstance(pd_payload, list):
+            classification = pd_payload
+        else:
+            classification = []
+
+        # Normalise classification into common shape if needed (list of dicts)
+        norm_class = []
+        for i, item in enumerate(classification, start=1):
+            if not isinstance(item, dict):
+                continue
+            main_dt = item.get("doc_type") or item.get("Document_type")
+            has_two = str(item.get("has_two") or item.get("Has_multiple_sections") or "").strip().lower() in ("true","1","yes","y","on")
+            second_dt = item.get("second_doc_type") or item.get("Second_doc_type")
+            norm_class.append({
+                "page_number": int(item.get("page_number") or i),
+                "doc_type": main_dt,
+                "has_two": "true" if has_two else "",
+                "second_doc_type": second_dt,
+                "is_continuation": "true" if str(item.get("is_continuation") or "").lower() == "true" else "",
+                "continuation_of": item.get("continuation_of"),
+            })
+        classification = norm_class
+
+        # Derive company_type from second-pass payload if provided
+        org_type_raw = None
+        if isinstance(pd_payload, dict):
+            org_type_raw = (pd_payload.get("organisation_type") or {}).get("type")
+        company_type = _mcc_mod.normalize_company_type(org_type_raw)
+        logging.getLogger(__name__).info("Routing company_type: %s (raw=%r)", company_type, org_type_raw)
 
         # 5) Group pages by doc_type (robust: classification + header heuristics + smoothing + dual-sections)
-        groups = _mcc_mod.build_groups(selected_pages, classification, pdf_bytes)
+        groups = _mcc_mod.build_groups(
+            selected_pages, classification, pdf_bytes, first_pass_results=results
+        )
         if not groups:
             return None
 
@@ -84,8 +133,12 @@ if generate_statements_excel is None:
             _b = _io.BytesIO(); _gw.write(_b); _b.seek(0)
             group_bytes = _b.getvalue()
 
-            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type)
-            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
+            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type, company_type=company_type)
+            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc, "company_type": company_type}
+            logging.getLogger(__name__).info(
+                "→ Routing %s via company_type=%s → parser=%s, model=%s, extra=%s, pages=%s",
+                doc_type, company_type, parser_app, model_id, extra_acc, page_list
+            )
 
             group_res = _mcc_mod.call_fracto(
                 group_bytes,
@@ -157,6 +210,8 @@ import os, time
 
 def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename: str, progress, status_write):
     """Run the 1st/2nd/3rd pass with UI updates and concurrency; returns workbook bytes or None."""
+    import pandas as pd  # local, avoids import-order issues
+    import io            # local, avoids import-order issu
     t_overall = time.time()
 
     # 1) First pass
@@ -167,15 +222,36 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     progress.progress(0.33, text=f"First pass complete in {dt0:.1f}s")
     status_write(f"✓ First pass complete in {dt0:.1f}s — {len(results)} page(s)")
 
-    # 2) Select pages
-    selected_pages = [
-        idx + 1 for idx, res in enumerate(results)
-        if res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
-    ]
+    from PyPDF2 import PdfReader, PdfWriter
+    def _is_true(x):
+        return str(x).strip().lower() in ("true", "1", "yes", "y")
+    # 2) Select pages where has_table=true (fallback to old logic if none)
+    def _get_has_table(res: dict) -> bool:
+        field = getattr(_mcc_mod, "HAS_TABLE_FIELD", "has_table")
+        pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
+        if isinstance(pdict, list):
+            for item in pdict:
+                if isinstance(item, dict) and field in item:
+                    return _is_true(item.get(field))
+            return False
+        return _is_true(pdict.get(field))
+    selected_pages = [idx + 1 for idx, res in enumerate(results) if _get_has_table(res)]
     if not selected_pages:
-        status_write("⚠️ No classified pages (all 'Others') — including the whole file for a careful second pass.")
-    # Include neighbours (±1) so we don’t miss continued pages
-    selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=1)
+        status_write("⚠️ No pages flagged with tables — falling back to classification-based selection.")
+        selected_pages = [
+            idx + 1
+            for idx, res in enumerate(results)
+            if (
+                res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
+                or _is_true(res.get("data", {}).get("parsedData", {}).get("Has_multiple_sections"))
+            )
+        ]
+    # Optional neighbour expansion via env var (default 0 to keep strict table-only selection)
+    try:
+        _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", str(getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0))))
+    except Exception:
+        _radius = getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0)
+    selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=_radius)
 
     # Build selected.pdf
     reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -189,9 +265,10 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     status_write("2/3 Second pass — classifying selected pages …")
     stem = Path(original_filename).stem
     t1 = time.time()
+    sel_pdf_name = _mcc_mod.SELECTED_PDF_NAME_TMPL.format(stem=stem)
     second_res = _mcc_mod.call_fracto(
         selected_bytes,
-        f"{stem}_selected.pdf",
+        sel_pdf_name,
         parser_app=_mcc_mod.SECOND_PARSER_APP_ID,
         model=_mcc_mod.SECOND_MODEL_ID,
         extra_accuracy=_mcc_mod.EXTRA_ACCURACY_SECOND,
@@ -201,9 +278,39 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     status_write(f"✓ Second pass complete in {dt1:.1f}s")
 
     # 4) Classification (w/ fallback)
-    classification = (
-        second_res.get("data", {}).get("parsedData", {}).get("page_wise_classification", [])
-    )
+    pd_payload = (second_res.get("data", {}) or {}).get("parsedData", {})
+    # Robust classification extraction (supports 'page_wise_classification' or 'classification')
+    classification = []
+    if isinstance(pd_payload, dict):
+        classification = pd_payload.get("page_wise_classification") or pd_payload.get("classification") or []
+    elif isinstance(pd_payload, list):
+        classification = pd_payload
+    else:
+        classification = []
+    norm_class = []
+    for i, item in enumerate(classification, start=1):
+        if not isinstance(item, dict):
+            continue
+        main_dt = item.get("doc_type") or item.get("Document_type")
+        has_two = str(item.get("has_two") or item.get("Has_multiple_sections") or "").strip().lower() in ("true","1","yes","y","on")
+        second_dt = item.get("second_doc_type") or item.get("Second_doc_type")
+        norm_class.append({
+            "page_number": int(item.get("page_number") or i),
+            "doc_type": main_dt,
+            "has_two": "true" if has_two else "",
+            "second_doc_type": second_dt,
+            "is_continuation": "true" if str(item.get("is_continuation") or "").lower() == "true" else "",
+            "continuation_of": item.get("continuation_of"),
+        })
+    classification = norm_class
+
+    # Company type for routing (from second pass, with normalisation)
+    org_type_raw = None
+    if isinstance(pd_payload, dict):
+        org_type_raw = (pd_payload.get("organisation_type") or {}).get("type")
+    company_type = _mcc_mod.normalize_company_type(org_type_raw)
+    logging.getLogger(__name__).info("Routing company_type: %s (raw=%r)", company_type, org_type_raw)
+
     if not classification:
         classification = [
             {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
@@ -216,7 +323,9 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         return None
 
     # 5) Group pages by doc_type (robust: classification + header heuristics + smoothing)
-    groups = _mcc_mod.build_groups(selected_pages, classification, pdf_bytes)
+    groups = _mcc_mod.build_groups(
+        selected_pages, classification, pdf_bytes, first_pass_results=results
+    )
     if not groups:
         status_write("⚠️ No groups found after classification.")
         return None
@@ -225,7 +334,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     status_write(f"3/3 Third pass — {n_groups} document type(s): {sorted(groups.keys())}")
 
     # 6) Process groups concurrently (limit = MAX_PARALLEL)
-    combined_sheets: dict[str, pd.DataFrame] = {}
+    combined_sheets: dict[str, "pd.DataFrame"] = {}
     routing_used: dict[str, dict] = {}
     completed = 0
     total = n_groups
@@ -240,13 +349,19 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
             b = io.BytesIO(); gw.write(b); b.seek(0)
             group_bytes = b.getvalue()
 
-            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type)
-            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
+            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type, company_type=company_type)
+            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc, "company_type": company_type}
+            logging.getLogger(__name__).info(
+                "→ Routing %s via company_type=%s → parser=%s, model=%s, extra=%s, pages=%s",
+                doc_type, company_type, parser_app, model_id, extra_acc, page_list
+            )
 
+            _slug = doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')
+            _group_pdf_name = _mcc_mod.CFG.get("export", {}).get("filenames", {}).get("group_pdf", "{stem}_{slug}.pdf").format(stem=stem, slug=_slug)
             futures[pool.submit(
                 _mcc_mod.call_fracto,
                 group_bytes,
-                f"{stem}_{doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')}.pdf",
+                _group_pdf_name,
                 parser_app=parser_app,
                 model=model_id,
                 extra_accuracy=extra_acc,
@@ -286,13 +401,19 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     # 7) Write workbook to bytes
     out_buf = io.BytesIO()
     with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-        for sheet_name, df_ in combined_sheets.items():
-            safe = sheet_name[:31] or "Sheet"
-            df_.to_excel(writer, sheet_name=safe, index=False)
+        _order = _mcc_mod.CFG.get("export", {}).get("statements_workbook", {}).get("sheet_order", [])
+        _written = set()
+        _style = _mcc_mod.CFG.get("export", {}).get("statements_workbook", {}).get("style", {})
+        _hdr_fg = str(_style.get("header_fill", "305496"))
+        _hdr_fc = str(_style.get("header_font_color", "FFFFFF"))
+        from openpyxl.styles import Font as _F, Alignment as _A, PatternFill as _P
+
+        def _write_sheet(_name, _df):
+            safe = _name[:31] or "Sheet"
+            _df.to_excel(writer, sheet_name=safe, index=False)
             ws = writer.book[safe]
-            from openpyxl.styles import Font as _F, Alignment as _A, PatternFill as _P
-            header_font  = _F(bold=True, color="FFFFFF")
-            header_fill  = _P("solid", fgColor="305496")
+            header_font  = _F(bold=True, color=_hdr_fc)
+            header_fill  = _P("solid", fgColor=_hdr_fg)
             header_align = _A(vertical="center", horizontal="center", wrap_text=True)
             max_width = 60
             for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
@@ -307,8 +428,21 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 cell.alignment = header_align
             ws.freeze_panes = "A2"
 
+        for _name in _order:
+            if _name in combined_sheets:
+                _write_sheet(_name, combined_sheets[_name]); _written.add(_name)
+        for _name, _df in combined_sheets.items():
+            if _name in _written:
+                continue
+            _write_sheet(_name, _df)
+
         # Optional routing summary at end
-        include_summary = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
+        env_flag = os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY")
+        include_summary = (
+            str(env_flag).strip().lower() in ("1","true","yes","y","on")
+            if env_flag is not None
+            else bool(_mcc_mod.EXPORT_INCLUDE_ROUTING_SUMMARY)
+        )
         if include_summary and routing_used:
             rows = []
             for dt in sorted(routing_used):
@@ -316,9 +450,10 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra",""))])
             pd.DataFrame(rows, columns=["Doc Type","Parser App ID","Model","Extra Accuracy"]).to_excel(writer, sheet_name="Routing Summary", index=False)
             ws = writer.book["Routing Summary"]
-            from openpyxl.styles import Font as _F, Alignment as _A, PatternFill as _P
             for cell in ws[1]:
-                cell.font = _F(bold=True, color="FFFFFF"); cell.fill = _P("solid", fgColor="305496"); cell.alignment = _A(vertical="center", horizontal="center", wrap_text=True)
+                cell.font = _F(bold=True, color=_hdr_fc)
+                cell.fill = _P("solid", fgColor=_hdr_fg)
+                cell.alignment = _A(vertical="center", horizontal="center", wrap_text=True)
             ws.freeze_panes = "A2"
 
     out_buf.seek(0)
@@ -702,7 +837,8 @@ if run:
             excel_bytes = buffer.getvalue()
             final_name = f"{base_name}_ocr.xlsx"
         else:
-            final_name = f"{base_name}_statements.xlsx"
+            _tmpl = _mcc_mod.CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
+            final_name = _tmpl.format(stem=base_name)
 
         progress.progress(1.0, text="Done!")
         st.session_state["excel_bytes"]   = excel_bytes

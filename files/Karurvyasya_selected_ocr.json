@@ -1,0 +1,77 @@
+{
+  "file": "Karurvyasya_selected.pdf",
+  "status": "ok",
+  "data": {
+    "job_id": 2147622872,
+    "job_status": "success",
+    "parsedData": {
+      "organisation_type": {
+        "type": "Bank"
+      },
+      "page_wise_classification": [
+        {
+          "page_number": 1,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 2,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 3,
+          "doc_type": "Standalone Profit and Loss Statement",
+          "section_role": "full"
+        },
+        {
+          "page_number": 4,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 5,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 6,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 7,
+          "doc_type": "Standalone Balance Sheet",
+          "section_role": "top",
+          "has_two": true,
+          "second_doc_type": "Standalone Cashflow",
+          "second_role": "bottom",
+          "split_hint": 0.48
+        },
+        {
+          "page_number": 8,
+          "is_continuation": true,
+          "continuation_of": "Standalone Cashflow"
+        },
+        {
+          "page_number": 9,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 10,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 11,
+          "doc_type": "Others",
+          "section_role": "full"
+        }
+      ]
+    },
+    "totalAttempts": 1,
+    "total_pages": 11,
+    "initiated_at": 1756797889793
+  }
+}

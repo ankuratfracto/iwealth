@@ -1,0 +1,1066 @@
+{
+  "file": "Karurvyasya.pdf",
+  "status": "ok",
+  "company_type": "bank",
+  "documents": {
+    "Standalone Balance Sheet": {
+      "pages": [
+        10
+      ],
+      "parser_app": "P4xzoeUxvctFNB2U",
+      "model": "gv1",
+      "extra_accuracy": "true",
+      "periods": {
+        "c1": {
+          "label": "As on 31.03.2025",
+          "start_date": "",
+          "end_date": "2025-03-31",
+          "role": "Reporting period",
+          "is_cumulative": false,
+          "is_audited": true
+        },
+        "c2": {
+          "label": "As on 31.03.2024",
+          "start_date": "",
+          "end_date": "2024-03-31",
+          "role": "Prior period",
+          "is_cumulative": false,
+          "is_audited": true
+        }
+      },
+      "rows": [
+        {
+          "sr_no": "",
+          "Particulars": "Capital",
+          "c1": "16102",
+          "c2": "16088",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Reserves and surplus",
+          "c1": "1176852",
+          "c2": "987920",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Deposits",
+          "c1": "10207799",
+          "c2": "8911272",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Borrowings",
+          "c1": "121698",
+          "c2": "247835",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Other liabilities and provisions",
+          "c1": "414291",
+          "c2": "382211",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Total",
+          "c1": "11936742",
+          "c2": "10545326",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Cash & balances with Reserve Bank of India",
+          "c1": "735419",
+          "c2": "558793",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Balances with banks and money at call and short notice",
+          "c1": "45253",
+          "c2": "7064",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Investments",
+          "c1": "2383125",
+          "c2": "2234352",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Advances",
+          "c1": "8400454",
+          "c2": "7366748",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Fixed assets",
+          "c1": "49017",
+          "c2": "43288",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Other assets",
+          "c1": "323474",
+          "c2": "335081",
+          "c3": "",
+          "c4": ""
+        },
+        {
+          "sr_no": "",
+          "Particulars": "Total",
+          "c1": "11936742",
+          "c2": "10545326",
+          "c3": "",
+          "c4": ""
+        }
+      ]
+    },
+    "Standalone Profit and Loss Statement": {
+      "pages": [
+        6
+      ],
+      "parser_app": "YrXa2Jwuj3icIX1c",
+      "model": "gv1",
+      "extra_accuracy": "true",
+      "periods": {
+        "c1": {
+          "label": "Quarter ended 31-03-2025",
+          "start_date": "2025-01-01",
+          "end_date": "2025-03-31",
+          "role": "current quarter",
+          "is_cumulative": false,
+          "is_audited": true
+        },
+        "c2": {
+          "label": "Quarter ended 31-12-2024",
+          "start_date": "2024-10-01",
+          "end_date": "2024-12-31",
+          "role": "previous quarter",
+          "is_cumulative": false,
+          "is_audited": false
+        },
+        "c3": {
+          "label": "Quarter ended 31-03-2024",
+          "start_date": "2024-01-01",
+          "end_date": "2024-03-31",
+          "role": "comparative quarter",
+          "is_cumulative": false,
+          "is_audited": true
+        },
+        "c4": {
+          "label": "Year ended 31-03-2025",
+          "start_date": "2024-04-01",
+          "end_date": "2025-03-31",
+          "role": "current fiscal year",
+          "is_cumulative": true,
+          "is_audited": true
+        },
+        "c5": {
+          "label": "Year ended 31-03-2024",
+          "start_date": "2023-04-01",
+          "end_date": "2024-03-31",
+          "role": "previous fiscal year",
+          "is_cumulative": true,
+          "is_audited": true
+        }
+      },
+      "rows": [
+        {
+          "sr_no": "",
+          "Particulars": "a) Interest / discount on advances / bills",
+          "c1": "208045",
+          "c2": "205807",
+          "c3": "182488",
+          "c4": "800765",
+          "c5": "685105"
+        },
+        {
+          "sr_no": "",
+          "Particulars": "b) Income on investments",
+          "c1": "42140",
+          "c2": "42276",
+          "c3": "35365",
+          "c4": "162247",
+          "c5": "133101"
+        },
+        {
+          "sr_no": "",
+          "Particulars": "c) Interest on balances with Reserve Bank of India & other interbank funds",
+          "c1": "982",
+          "c2": "232",
+          "c3": "364",
+          "c4": "2012",
+          "c5": "2205"
+        },
+        {
+          "sr_no": "",
+          "Particulars": "d) Other interest",
+          "c1": "426",
+          "c2": "547",
+          "c3": "488",
+          "c4": "2780",
+          "c5": "905"
+        },
+        {
+          "sr_no": "1",
+          "Particulars": "Interest earned (a+b+c+d)",
+          "c1": "251593",
+          "c2": "248862",
+          "c3": "218705",
+          "c4": "967804",
+          "c5": "821316"
+        },
+        {
+          "sr_no": "2",
+          "Particulars": "Other income",
+          "c1": "50933",
+          "c2": "46482",
+          "c3": "62637",
+          "c4": "182955",
+          "c5": "164947"
+        },
+        {
+          "sr_no": "3",
+          "Particulars": "Total income (1+2)",
+          "c1": "302526",
+          "c2": "295344",
+          "c3": "281342",
+          "c4": "1150759",
+          "c5": "986263"
+        },
+        {
+          "sr_no": "4",
+          "Particulars": "Interest expended",
+          "c1": "142667",
+          "c2": "140722",
+          "c3": "118911",
+          "c4": "541812",
+          "c5": "439474"
+        },
+        {
+          "sr_no": "",
+          "Particulars": "(i) Employees cost",
+          "c1": "38493",
+          "c2": "37382",
+          "c3": "43975",
+          "c4": "144921",
+          "c5": "146103"
+        },
+        {
+          "sr_no": "",
+          "Particulars": "(ii) Other operating expenses",
+          "c1": "37869",
+          "c2": "35713",
+          "c3": "31765",
+          "c4": "142793",
+          "c5": "117772"
+        },
+        {
+          "sr_no": "5",
+          "Particulars": "Operating expenses (i+ii)",
+          "c1": "76362",
+          "c2": "73095",
+          "c3": "75740",
+          "c4": "287714",
+          "c5": "263875"
+        },
+        {
+          "sr_no": "6",
+          "Particulars": "Total expenditure (excluding provisions and contingencies) (4+5)",
+          "c1": "219029",
+          "c2": "213817",
+          "c3": "194651",
+          "c4": "829526",
+          "c5": "703349"
+        },
+        {
+          "sr_no": "7",
+          "Particulars": "Operating profit before provisions and contingencies (3-6)",
+          "c1": "83497",
+          "c2": "81527",
+          "c3": "86691",
+          "c4": "321233",
+          "c5": "282914"
+        },
+        {
+          "sr_no": "8",
+          "Particulars": "Provisions (other than tax) and contingencies",
+          "c1": "16140",
+          "c2": "14744",
+          "c3": "29341",
+          "c4": "62160",
+          "c5": "72895"
+        },
+        {
+          "sr_no": "9",
+          "Particulars": "Exceptional items",
+          "c1": "",
+          "c2": "",
+          "c3": "",
+          "c4": "",
+          "c5": ""
+        },
+        {
+          "sr_no": "10",
+          "Particulars": "Profit from ordinary activities before tax (7-8-9)",
+          "c1": "67357",
+          "c2": "66783",
+          "c3": "57350",
+          "c4": "259073",
+          "c5": "210019"
+        },
+        {
+          "sr_no": "11",
+          "Particulars": "Tax expense",
+          "c1": "16021",
+          "c2": "17180",
+          "c3": "11740",
+          "c4": "64909",
+          "c5": "49538"
+        },
+        {
+          "sr_no": "12",
+          "Particulars": "Net profit from ordinary activities after tax (10-11)",
+          "c1": "51336",
+          "c2": "49603",
+          "c3": "45610",
+          "c4": "194164",
+          "c5": "160481"
+        },
+        {
+          "sr_no": "13",
+          "Particulars": "Extraordinary items (net of tax expense)",
+          "c1": "",
+          "c2": "",
+          "c3": "",
+          "c4": "",
+          "c5": ""
+        },
+        {
+          "sr_no": "14",
+          "Particulars": "Net profit for the period (12-13)",
+          "c1": "51336",
+          "c2": "49603",
+          "c3": "45610",
+          "c4": "194164",
+          "c5": "160481"
+        },
+        {
+          "sr_no": "15",
+          "Particulars": "Paid-up equity share capital (FV Rs.2/- per share)",
+          "c1": "16102",
+          "c2": "16100",
+          "c3": "16088",
+          "c4": "16102",
+          "c5": "16088"
+        },
+        {
+          "sr_no": "16",
+          "Particulars": "Reserves excluding revaluation reserve",
+          "c1": "",
+          "c2": "",
+          "c3": "",
+          "c4": "1176852",
+          "c5": "987920"
+        },
+        {
+          "sr_no": "17",
+          "Particulars": "Analytical ratio",
+          "c1": "",
+          "c2": "",
+          "c3": "",
+          "c4": "",
+          "c5": ""
+        }
+      ]
+    },
+    "Standalone Cashflow": {
+      "pages": [
+        10,
+        11
+      ],
+      "parser_app": "VGAEODaeYv4nr3fM",
+      "model": "gv1",
+      "extra_accuracy": "true",
+      "periods": {
+        "c1": {
+          "label": "Year ended 31-03-2025",
+          "start_date": "2024-04-01",
+          "end_date": "2025-03-31",
+          "role": "Current Period",
+          "is_cumulative": true,
+          "is_audited": true
+        },
+        "c2": {
+          "label": "Year ended 31-03-2024",
+          "start_date": "2023-04-01",
+          "end_date": "2024-03-31",
+          "role": "Previous Period",
+          "is_cumulative": true,
+          "is_audited": true
+        }
+      },
+      "rows": [
+        {
+          "sr_no": "1.1",
+          "Particulars": "Net Profit as per Profit and Loss account",
+          "c1": 194164.0,
+          "c2": 160481.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2",
+          "Particulars": "Adjustments for",
+          "c1": NaN,
+          "c2": NaN,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.1",
+          "Particulars": "Depreciation on Bank's property",
+          "c1": 11373.0,
+          "c2": 10026.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.2",
+          "Particulars": "Interest paid on TIER II bonds",
+          "c1": 5501.0,
+          "c2": NaN,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.3",
+          "Particulars": "Provisions for other contingencies",
+          "c1": 11785.0,
+          "c2": 10842.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.4",
+          "Particulars": "Provision for taxes",
+          "c1": 64909.0,
+          "c2": 49538.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.5",
+          "Particulars": "Provision for depreciation on investment",
+          "c1": NaN,
+          "c2": -25461.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.6",
+          "Particulars": "Provision for standard assets",
+          "c1": 3995.0,
+          "c2": 4474.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.7",
+          "Particulars": "Provision for bad and doubtful debts",
+          "c1": 44040.0,
+          "c2": 42766.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.8",
+          "Particulars": "Provision for non performing investments",
+          "c1": 2340.0,
+          "c2": 14813.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.9",
+          "Particulars": "Provision for compensation absences",
+          "c1": 3130.0,
+          "c2": 7264.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.10",
+          "Particulars": "Provision for medical leave",
+          "c1": 1124.0,
+          "c2": NaN,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.11",
+          "Particulars": "Amortization of premium paid on Held to Maturity (HTM) investments",
+          "c1": 8528.0,
+          "c2": 10362.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.12",
+          "Particulars": "Provision for employees stock option plan / scheme",
+          "c1": 275.0,
+          "c2": 341.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.2.13",
+          "Particulars": "(Profit)/Loss on sale of fixed assets (net)",
+          "c1": -306.0,
+          "c2": -783.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.3",
+          "Particulars": "Operating profit before working capital changes",
+          "c1": 345357.0,
+          "c2": 290164.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.4",
+          "Particulars": "Adjustments for working capital changes",
+          "c1": NaN,
+          "c2": NaN,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.4.1",
+          "Particulars": "(Increase)/Decrease in investments (excluding HTM investments)",
+          "c1": 52251.0,
+          "c2": -232613.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.4.2",
+          "Particulars": "(Increase) / Decrease in advances",
+          "c1": -1077642.0,
+          "c2": -1095896.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.4.3",
+          "Particulars": "(Increase)/Decrease in other assets",
+          "c1": 8812.0,
+          "c2": -40565.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.4.4",
+          "Particulars": "Increase (Decrease) in deposits",
+          "c1": 1296526.0,
+          "c2": 1247514.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.4.5",
+          "Particulars": "Increase/(Decrease) in borrowings",
+          "c1": -126137.0,
+          "c2": 153333.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.4.6",
+          "Particulars": "Increase/(Decrease) in other liabilities and provisions",
+          "c1": 1039.0,
+          "c2": 18969.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.5",
+          "Particulars": "Operating profit after working capital changes",
+          "c1": 500206.0,
+          "c2": 340906.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.6",
+          "Particulars": "Direct taxes paid",
+          "c1": -51500.0,
+          "c2": -45500.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1.7",
+          "Particulars": "Net cash flow (from)/ used in operating activities",
+          "c1": 448706.0,
+          "c2": 295406.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "1",
+          "Particulars": "Cash flow from/(used in) operating activities",
+          "c1": 448706.0,
+          "c2": 295406.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "2.1",
+          "Particulars": "Purchase of fixed assets",
+          "c1": -17163.0,
+          "c2": -9810.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "2.2",
+          "Particulars": "(Increase)/Decrease in HTM investments",
+          "c1": -198283.0,
+          "c2": -120621.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "2.3",
+          "Particulars": "Sale of fixed assets / other assets",
+          "c1": 366.0,
+          "c2": 783.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "2.4",
+          "Particulars": "Net cash flow from/ (used in) investing activities",
+          "c1": -215080.0,
+          "c2": -129648.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "2",
+          "Particulars": "Cash flow from investing activities",
+          "c1": -215080.0,
+          "c2": -129648.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "3.1",
+          "Particulars": "Proceeds from share capital",
+          "c1": 15.0,
+          "c2": 46.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "3.2",
+          "Particulars": "Proceeds from share premium",
+          "c1": 427.0,
+          "c2": 785.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "3.3",
+          "Particulars": "Increase/(Decrease) in tier II bonds",
+          "c1": NaN,
+          "c2": -48700.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "3.4",
+          "Particulars": "Interest paid on tier Il bonds",
+          "c1": -5501.0,
+          "c2": -16044.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "3.5",
+          "Particulars": "Dividend paid",
+          "c1": -19253.0,
+          "c2": -16044.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "3.6",
+          "Particulars": "Net cash flow from/ (used in) financing activities",
+          "c1": -18811.0,
+          "c2": -69414.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "3",
+          "Particulars": "Cash flow from financing activities",
+          "c1": -18811.0,
+          "c2": -69414.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "4",
+          "Particulars": "Net Increase/(decrease) in cash & cash equivalents",
+          "c1": 214815.0,
+          "c2": 96344.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "5",
+          "Particulars": "Cash and cash equivalents at the beginning of the year",
+          "c1": 565857.0,
+          "c2": 469513.0,
+          "c3": null,
+          "c4": null
+        },
+        {
+          "sr_no": "6",
+          "Particulars": "Cash and cash equivalents at the end of the year",
+          "c1": 780672.0,
+          "c2": 565857.0,
+          "c3": null,
+          "c4": null
+        }
+      ]
+    }
+  },
+  "first_pass": [
+    {
+      "file": "Karurvyasya_page_1.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622861,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873399
+      }
+    },
+    {
+      "file": "Karurvyasya_page_2.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622857,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": false
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873112
+      }
+    },
+    {
+      "file": "Karurvyasya_page_3.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622862,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": false
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873459
+      }
+    },
+    {
+      "file": "Karurvyasya_page_4.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622855,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873102
+      }
+    },
+    {
+      "file": "Karurvyasya_page_5.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622860,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": false
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873395
+      }
+    },
+    {
+      "file": "Karurvyasya_page_6.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622856,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873097
+      }
+    },
+    {
+      "file": "Karurvyasya_page_7.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622859,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873334
+      }
+    },
+    {
+      "file": "Karurvyasya_page_8.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622858,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873214
+      }
+    },
+    {
+      "file": "Karurvyasya_page_9.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622863,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797873479
+      }
+    },
+    {
+      "file": "Karurvyasya_page_10.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622864,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797878119
+      }
+    },
+    {
+      "file": "Karurvyasya_page_11.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622868,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797878800
+      }
+    },
+    {
+      "file": "Karurvyasya_page_12.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622865,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": false
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797878558
+      }
+    },
+    {
+      "file": "Karurvyasya_page_13.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622866,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797878641
+      }
+    },
+    {
+      "file": "Karurvyasya_page_14.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622867,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797878727
+      }
+    },
+    {
+      "file": "Karurvyasya_page_15.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622869,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": true
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797878854
+      }
+    },
+    {
+      "file": "Karurvyasya_page_16.pdf",
+      "status": "ok",
+      "data": {
+        "job_id": 2147622870,
+        "job_status": "success",
+        "parsedData": {
+          "has_table": false
+        },
+        "totalAttempts": 1,
+        "total_pages": 1,
+        "initiated_at": 1756797879299
+      }
+    }
+  ],
+  "second_pass": {
+    "file": "Karurvyasya_selected.pdf",
+    "status": "ok",
+    "data": {
+      "job_id": 2147622872,
+      "job_status": "success",
+      "parsedData": {
+        "organisation_type": {
+          "type": "Bank"
+        },
+        "page_wise_classification": [
+          {
+            "page_number": 1,
+            "doc_type": "Others",
+            "section_role": "full"
+          },
+          {
+            "page_number": 2,
+            "doc_type": "Others",
+            "section_role": "full"
+          },
+          {
+            "page_number": 3,
+            "doc_type": "Standalone Profit and Loss Statement",
+            "section_role": "full"
+          },
+          {
+            "page_number": 4,
+            "doc_type": "Others",
+            "section_role": "full"
+          },
+          {
+            "page_number": 5,
+            "doc_type": "Others",
+            "section_role": "full"
+          },
+          {
+            "page_number": 6,
+            "doc_type": "Others",
+            "section_role": "full"
+          },
+          {
+            "page_number": 7,
+            "doc_type": "Standalone Balance Sheet",
+            "section_role": "top",
+            "has_two": true,
+            "second_doc_type": "Standalone Cashflow",
+            "second_role": "bottom",
+            "split_hint": 0.48
+          },
+          {
+            "page_number": 8,
+            "is_continuation": true,
+            "continuation_of": "Standalone Cashflow"
+          },
+          {
+            "page_number": 9,
+            "doc_type": "Others",
+            "section_role": "full"
+          },
+          {
+            "page_number": 10,
+            "doc_type": "Others",
+            "section_role": "full"
+          },
+          {
+            "page_number": 11,
+            "doc_type": "Others",
+            "section_role": "full"
+          }
+        ]
+      },
+      "totalAttempts": 1,
+      "total_pages": 11,
+      "initiated_at": 1756797889793
+    }
+  }
+}

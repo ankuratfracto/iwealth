@@ -1,0 +1,310 @@
+version: 1
+project: iwealth
+
+api:
+  endpoint: "https://prod-ml.fracto.tech/upload-file-smart-ocr"
+  api_key_env: "FRACTO_API_KEY"     # read the key from env at runtime
+  api_key: "KUS-KUS-D09D77-709841-JXR4YETC"  # fallback if env var not set
+  timeout_seconds: 300              # per-request timeout
+
+concurrency:
+  chunk_size_pages: 1
+  max_parallel: 9
+  min_tail_combine: 1
+
+passes:
+  first:
+    parser_app: "jIsqGEQwxdqZR35R"     # default first-pass parser
+    model: "tv7"
+    extra_accuracy: false
+    selection:
+      use_has_table: true
+      has_table_field: "has_table"     # field under parsedData (legacy; kept for fallback)
+      neighbor_radius: 0               # 0 keeps strictly table pages
+      # New: config‑driven selection rules; if present, replaces the legacy has_table picker
+      criteria:
+        combine: any                   # any | all
+        rules:
+          - { alias: "first_pass.has_table", op: "truthy" }
+          # Examples you can toggle/extend:
+          # - { path: "parsedData.Document_type", op: "neq", value: "Others" }
+          # - { path: "parsedData.Has_multiple_sections", op: "truthy" }
+      fallbacks:
+        - classification_non_others    # fallback 1: Non-"Others" pages
+        - all_pages                    # fallback 2: include everything
+  second:
+    parser_app: "pDJoI1nbLM6TvD5u"     # second-pass (selected.pdf) classifier
+    model: "gv1"
+    extra_accuracy: false
+    save_selected_json: true
+    selected_json_name: "{stem}_selected_ocr.json"
+    selected_pdf_name:  "{stem}_selected.pdf"
+    combine_pages: true
+  filter:
+    enable: false                  # turn off to skip quick pruning
+    parser_app: "pDJoI1nbLM6TvD5u"   # reuse the classifier; set your nano/light parserApp if different
+    model: "tv7"                 # set the tiny model you have (fallbacks to your config if unavailable)
+    extra_accuracy: false
+    min_pages_to_run: 6           # only run this filter if ≥ N pages are selected
+    keep_if_has_two: true         # always keep mixed pages
+    drop_others: true             # drop pages whose doc_type normalises to 'Others'
+    keep_doc_types:               # doc types to keep (normalised to canonical labels)
+      - Consolidated Balance Sheet
+      - Standalone Balance Sheet
+      - Consolidated Profit and Loss Statement
+      - Standalone Profit and Loss Statement
+      - Consolidated Cashflow
+      - Standalone Cashflow
+  third:
+    defaults:
+      parser_app: "ft0CicYHxV6UwAfD"   # default if routing has no match
+      model: "tv7"
+      extra_accuracy: true
+    # Retry plan if a group's validation fails
+    on_validation_failure:
+      retries:
+        - { extra_accuracy: true }     # re-run with extra accuracy
+        - { alternate_parser: true }   # try next parser in routing for that (company_type, doc_type)
+        - { fallback_company_type: "corporate" }  # last-resort generic
+    combine_pages: true
+
+labels:
+  canonical:                           # exactly these 7 labels
+    - Consolidated Balance Sheet
+    - Standalone Balance Sheet
+    - Consolidated Profit and Loss Statement
+    - Standalone Profit and Loss Statement
+    - Consolidated Cashflow
+    - Standalone Cashflow
+    - Others
+  normalization:                       # regex → canonical (case-insensitive)
+    - { pattern: "^consolidated.*balance.*", label: "Consolidated Balance Sheet" }
+    - { pattern: "^standalone.*balance.*",  label: "Standalone Balance Sheet" }
+    - { pattern: "statement of assets and liabilities", label: "Standalone Balance Sheet" }
+    - { pattern: "^consolidated.*(profit).*(loss)", label: "Consolidated Profit and Loss Statement" }
+    - { pattern: "^standalone.*(profit).*(loss)",   label: "Standalone Profit and Loss Statement" }
+    - { pattern: "(statement of profit).*(loss)",   label: "Standalone Profit and Loss Statement" }
+    - { pattern: "^consolidated.*cash.*flow", label: "Consolidated Cashflow" }
+    - { pattern: "^standalone.*cash.*flow",  label: "Standalone Cashflow" }
+    - { pattern: "cash\\s*flow",             label: "Standalone Cashflow" }
+  regex_flags: "i"                     # case-insensitive
+
+classification:
+  # Use these anchors on normalized, whitespace-collapsed text
+  anchors:
+    balance_sheet:
+      generic:
+        - "statement of assets and liabilities"
+        - "balance sheet"
+        - "equity and liabilities"
+        - "capital and liabilities"
+        - "\\bassets\\b"
+      bank_specific:
+        - "\\bcapital\\b"
+        - "reserves and surplus"
+        - "\\bdeposits\\b"
+        - "\\bborrowings\\b"
+        - "other liabilities and provisions"
+        - "cash (and )?balances? with rbi"
+        - "balances with banks.*money at call and short notice"
+        - "\\binvestments\\b"
+        - "\\badvances\\b"
+      end_checks:
+        - "total equity and liabilities"
+        - "total assets"
+    profit_and_loss:
+      generic:
+        - "statement of profit and loss"
+        - "profit and loss statement"
+        - "revenue from operations"
+        - "other income"
+        - "total income \\(i\\+ii\\)"
+        - "profit before tax"
+        - "earnings per share"
+      bank_specific:
+        - "interest earned"
+        - "interest expended"
+        - "operating expenses"
+        - "provisions \\(other than tax\\) and contingencies"
+    cashflow:
+      generic:
+        - "cash flow from operating activities"
+        - "cash flow from investing activities"
+        - "cash flow from financing activities"
+      end_checks:
+        - "net increase/\\(decrease\\) in cash and cash equivalents"
+        - "cash and cash equivalents at the end"
+  negatives:                           # if these dominate → label as Others
+    press_results:
+      - "audited financial results"
+      - "unaudited financial results"
+      - "results for the quarter|year ended"
+    segment_reporting:
+      - "segment reporting"
+    ratios_disclosures:
+      - "\\bratio\\b"
+      - "capital adequacy"
+      - "provision coverage ratio"
+      - "\\bnpa\\b"
+      - "basel"
+      - "pillar\\s?-?iii"
+    regulatory_notes:
+      - "rbi circular"
+      - "\\bsebi\\b"
+      - "irdai"
+      - "note \\d+"
+  continuation_cues:
+    balance_sheet:
+      - "trade receivables"
+      - "other financial liabilities"
+      - "property, plant and equipment"
+      - "\\binvestments\\b"
+    profit_and_loss:
+      - "other income"
+      - "\\bexpenses\\b"
+      - "finance costs"
+      - "earnings per share"
+    cashflow:
+      - "adjustments for"
+      - "investing activities"
+      - "financing activities"
+      - "cash and cash equivalents at the end"
+  mixed_page:
+    enable: true
+    min_primary_height_ratio: 0.55      # primary must occupy ≥ 55% height
+    default_split_hint: 0.58
+    # treat tiny cross-references as noise; don't mark has_two
+    min_secondary_height_ratio: 0.25
+
+company_type_prior:                     # soft prior; never a hard gate
+  types: [bank, nbfc, insurance, corporate]
+  default: "corporate"
+  patterns:
+    bank:
+      - "banking regulation act"
+      - "\\bcrar\\b|basel"
+      - "\\bnpa\\b|priority sector"
+      - "cash and balances with rbi"
+    nbfc:
+      - "\\bnbfc\\b"
+      - "expected credit loss|ecl|stage\\s?[1-3]"
+      - "ind\\s?as\\s?109"
+    insurance:
+      - "irdai"
+      - "policyholders'? fund"
+      - "claims incurred"
+      - "gross written premium"
+
+routing:                                # per (company_type × doc_type)
+  # doc_type keys must be lower-case canonical labels
+  corporate:
+    consolidated balance sheet:             { parser: "vVWw2KvKj4VOpLB5", model: "gv1", extra: true }
+    standalone balance sheet:               { parser: "P4xzoeUxvctFNB2U", model: "gv1", extra: true }
+    consolidated profit and loss statement: { parser: "qzUWGg2koicgfDjS", model: "gv1", extra: true }
+    # done
+    standalone profit and loss statement:   { parser: "AVYIoCJI1gcmFxpr", model: "gv1", extra: true }
+    # done
+    consolidated cashflow:                  { parser: "utsRkUphzettfKd0", model: "gv1", extra: true }
+    standalone cashflow:                    { parser: "o5inZlcNpq04adGp", model: "gv1", extra: true }
+  bank:
+    consolidated balance sheet:             { parser: "vVWw2KvKj4VOpLB5", model: "gv1", extra: true }
+    # done
+    standalone balance sheet:               { parser: "P4xzoeUxvctFNB2U", model: "gv1", extra: true }
+    # done
+    consolidated profit and loss statement: { parser: "DNEQBl1VYnOyWGoF", model: "gv1", extra: true }
+    # done
+    standalone profit and loss statement:   { parser: "YrXa2Jwuj3icIX1c", model: "gv1", extra: true }
+    # done
+    consolidated cashflow:                  { parser: "utsRkUphzettfKd0", model: "gv1", extra: true }
+    standalone cashflow:                    { parser: "VGAEODaeYv4nr3fM", model: "gv1", extra: true }
+  nbfc: {}
+  insurance: {}
+  fallback_order:
+    - "company_type_and_doc_type"    # exact match
+    - "corporate_and_doc_type"       # generic fallback
+    - "third_defaults"               # passes.third.defaults
+
+units_and_scaling:
+  unit_header_patterns:
+    - "₹\\s*(in\\.?|in)\\s*(crore|cr|million|mn|lakh|thousand)"
+  multipliers:
+    crore: 10000000
+    lakh: 100000
+    million: 1000000
+    thousand: 1000
+
+grouping:
+  absorb_others_between_same_type: true
+  neighbor_radius: 1                 # smoothing window when building ranges
+  inherit_scope_on_continuation: true
+
+validation:
+  enable: true
+  rounding_tolerance_units:          # acceptable absolute diffs by unit
+    crore: 0.01                      # ≈ 1 lakh when numbers are in crore
+    million: 0.01
+    lakh: 1
+    thousand: 10
+  checks:
+    balance_sheet:
+      enforce_equation: true         # Assets ≈ Equity + Liabilities
+      pct_tolerance: 0.015           # 1.5% or rounding tolerance (whichever higher)
+    profit_and_loss:
+      require_eps_block: true
+    cashflow:
+      enforce_cash_tie: true         # CFO + CFI + CFF ≈ Δ cash; tie to opening/closing
+
+export:
+  statements_workbook:
+    sheet_order:
+      - Consolidated Balance Sheet
+      - Consolidated Profit and Loss Statement
+      - Consolidated Cashflow
+      - Standalone Balance Sheet
+      - Standalone Profit and Loss Statement
+      - Standalone Cashflow
+    include_routing_summary: true
+    use_period_labels: true
+    style:
+      header_fill: "305496"          # hex (no #)
+      header_font_color: "FFFFFF"
+    freeze_panes: "A2"
+  filenames:
+    group_pdf:  "{stem}_{slug}.pdf"
+    group_json: "{stem}_{slug}_ocr.json"
+    statements_xlsx: "{stem}_statements.xlsx"
+  combined_json:
+    filename: "{stem}_statements.json"
+    include_first_pass: true
+    include_second_pass: true
+    include_third_pass_raw: false    # set true to embed raw parsedData for each group
+    include_rows: true               # flattened rows for each group
+
+logging:
+  level: "INFO"
+  json: false
+  include_timing: true
+
+paths:
+  mapping_yaml: "mapping.yaml"       # reuse your existing file
+  config_local: "config.local.yaml"  # optional overrides (git-ignored)
+
+truthy_values: ["true","1","yes","y","on"]
+
+
+schema:
+  first_pass:
+    has_table: ["parsedData.has_table"]
+    document_type: ["parsedData.Document_type"]
+    has_multiple_sections: ["parsedData.Has_multiple_sections"]
+
+  second_pass:
+    organisation_type: ["organisation_type.type"]            # was parsedData.organisation_type.type
+    classification_container: ["page_wise_classification", "classification"]   # was parsedData.*
+    fields:
+      page_number: ["page_number", "pageNo", "index"]
+      doc_type: ["doc_type", "Document_type"]
+      is_continuation: ["is_continuation", "isContinuation"]
+      continuation_of: ["continuation_of", "continuationOf"]
+      has_two: ["has_two", "Has_multiple_sections"]
+      second_doc_type: ["second_doc_type", "Second_doc_type", "secondType"]
