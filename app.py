@@ -379,19 +379,19 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 gdt = time.time() - g0
                 status_write(f"  ✓ {doc_type} done in {gdt:.1f}s")
 
-            # Collect period labels for this doc_type (if provided by parser)
-            try:
-                _periods = (((group_res or {}).get("data", {}) or {}).get("parsedData", {}) or {}).get("meta", {}).get("periods") or []
-                _labels = {}
-                for _p in _periods:
-                    if isinstance(_p, dict):
-                        _pid = str((_p.get("id") or "")).strip().lower()
-                        if _pid:
-                            _labels[_pid] = (_p.get("label") or "")
-                if _labels:
-                    periods_hint[doc_type] = _labels
-            except Exception:
-                pass
+                # Collect period labels for this doc_type (if provided by parser)
+                try:
+                    _periods = (((group_res or {}).get("data", {}) or {}).get("parsedData", {}) or {}).get("meta", {}).get("periods") or []
+                    _labels = {}
+                    for _p in _periods:
+                        if isinstance(_p, dict):
+                            _pid = str((_p.get("id") or "")).strip().lower()
+                            if _pid:
+                                _labels[_pid] = (_p.get("label") or "")
+                    if _labels:
+                        periods_hint[doc_type] = _labels
+                except Exception:
+                    pass
 
             except Exception as exc:
                 status_write(f"  ✗ {doc_type} failed: {exc}")
