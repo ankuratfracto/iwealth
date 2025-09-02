@@ -15,7 +15,7 @@ concurrency:
 passes:
   first:
     parser_app: "jIsqGEQwxdqZR35R"     # default first-pass parser
-    model: "tv7"
+    model: "tv6"
     extra_accuracy: false
     selection:
       use_has_table: true

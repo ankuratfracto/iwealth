@@ -125,6 +125,7 @@ if generate_statements_excel is None:
         # 6) Third pass per group (sequential to be Cloud-friendly)
         combined_sheets: dict[str, _pd.DataFrame] = {}
         routing_used: dict[str, dict] = {}
+        periods_hint: dict[str, dict] = {}
         for doc_type, page_list in groups.items():
             page_list = sorted(page_list)
             _gw = PdfWriter()
@@ -147,6 +148,21 @@ if generate_statements_excel is None:
                 model=model_id,
                 extra_accuracy=extra_acc,
             )
+
+            # Collect period labels for this doc_type (if provided by parser)
+            try:
+                _periods = (((group_res or {}).get("data", {}) or {}).get("parsedData", {}) or {}).get("meta", {}).get("periods") or []
+                _labels = {}
+                for _p in _periods:
+                    if isinstance(_p, dict):
+                        _pid = str((_p.get("id") or "")).strip().lower()
+                        if _pid:
+                            _labels[_pid] = (_p.get("label") or "")
+                if _labels:
+                    periods_hint[doc_type] = _labels
+            except Exception:
+                pass
+        
             parsed = group_res.get("data", {}).get("parsedData", [])
             rows_list = _mcc_mod._extract_rows(parsed)
             if rows_list:
@@ -163,47 +179,34 @@ if generate_statements_excel is None:
         if not combined_sheets:
             return None
 
-        # 7) Write workbook (same header styling + freeze panes)
-        out_buf = _io.BytesIO()
-        with _pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            for sheet_name, df in combined_sheets.items():
-                safe = sheet_name[:31] or "Sheet"
-                df.to_excel(writer, sheet_name=safe, index=False)
-                ws = writer.book[safe]
-                header_font  = _Font(bold=True, color="FFFFFF")
-                header_fill  = _PatternFill("solid", fgColor="305496")
-                header_align = _Alignment(vertical="center", horizontal="center", wrap_text=True)
-                max_width = 60
-                for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
-                    longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-                    width = min(max(longest + 2, 10), max_width)
-                    ws.column_dimensions[col[0].column_letter].width = width
-                    for c in col[1:]:
-                        c.alignment = _Alignment(vertical="top", wrap_text=True)
-                for cell in ws[1]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.alignment = header_align
-                ws.freeze_panes = "A2"
+        # 7) Write workbook using the shared CLI writer (single-pass, correct headers)
+        import tempfile as _tempfile, shutil as _shutil, json as _json
+        tmpdir = Path(_tempfile.mkdtemp(prefix="iwealth_")).resolve()
+        try:
+            # Save the uploaded PDF so the writer can resolve paths & infer BS labels if needed
+            tmp_pdf_path = (tmpdir / f"{stem}.pdf")
+            tmp_pdf_path.write_bytes(pdf_bytes)
 
-            # Optional Routing Summary at end if you turn it on
-            include_summary = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
-            if include_summary and routing_used:
-                rows = []
-                for dt in sorted(routing_used):
-                    cfg = routing_used[dt]
-                    rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra",""))])
-                _pd.DataFrame(rows, columns=["Doc Type","Parser App ID","Model","Extra Accuracy"])\
-                   .to_excel(writer, sheet_name="Routing Summary", index=False)
-                ws = writer.book["Routing Summary"]
-                for cell in ws[1]:
-                    cell.font = _Font(bold=True, color="FFFFFF")
-                    cell.fill = _PatternFill("solid", fgColor="305496")
-                    cell.alignment = _Alignment(vertical="center", horizontal="center", wrap_text=True)
-                ws.freeze_panes = "A2"
+            # Provide pages mapping so the writer can infer BS headers from PDF if periods are missing
+            json_name_tmpl = _mcc_mod.CFG.get("export", {}).get("combined_json", {}).get("filename", "{stem}_statements.json")
+            combined_obj = {"documents": {dt: {"pages": groups.get(dt, [])} for dt in groups}}
+            (tmpdir / json_name_tmpl.format(stem=stem)).write_text(_json.dumps(combined_obj), encoding="utf-8")
 
-        out_buf.seek(0)
-        return out_buf.getvalue()
+            # Call the shared writer; it returns the xlsx path
+            xlsx_out = _mcc_mod._write_statements_workbook(
+                str(tmp_pdf_path),
+                stem,
+                combined_sheets,
+                routing_used=routing_used,
+                periods_by_doc=periods_hint
+            )
+            xlsx_bytes = Path(xlsx_out).read_bytes()
+            return xlsx_bytes
+        finally:
+            try:
+                _shutil.rmtree(tmpdir)
+            except Exception:
+                pass
 
 # --- Statements Excel with progress and concurrency ---
 import os, time
@@ -336,6 +339,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     # 6) Process groups concurrently (limit = MAX_PARALLEL)
     combined_sheets: dict[str, "pd.DataFrame"] = {}
     routing_used: dict[str, dict] = {}
+    periods_hint: dict[str, dict] = {}
     completed = 0
     total = n_groups
 
@@ -374,6 +378,21 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 group_res = fut.result()
                 gdt = time.time() - g0
                 status_write(f"  ✓ {doc_type} done in {gdt:.1f}s")
+
+            # Collect period labels for this doc_type (if provided by parser)
+            try:
+                _periods = (((group_res or {}).get("data", {}) or {}).get("parsedData", {}) or {}).get("meta", {}).get("periods") or []
+                _labels = {}
+                for _p in _periods:
+                    if isinstance(_p, dict):
+                        _pid = str((_p.get("id") or "")).strip().lower()
+                        if _pid:
+                            _labels[_pid] = (_p.get("label") or "")
+                if _labels:
+                    periods_hint[doc_type] = _labels
+            except Exception:
+                pass
+
             except Exception as exc:
                 status_write(f"  ✗ {doc_type} failed: {exc}")
                 continue
@@ -398,68 +417,36 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         status_write("⚠️ No tabular data parsed in third pass.")
         return None
 
-    # 7) Write workbook to bytes
-    out_buf = io.BytesIO()
-    with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-        _order = _mcc_mod.CFG.get("export", {}).get("statements_workbook", {}).get("sheet_order", [])
-        _written = set()
-        _style = _mcc_mod.CFG.get("export", {}).get("statements_workbook", {}).get("style", {})
-        _hdr_fg = str(_style.get("header_fill", "305496"))
-        _hdr_fc = str(_style.get("header_font_color", "FFFFFF"))
-        from openpyxl.styles import Font as _F, Alignment as _A, PatternFill as _P
+    # 7) Write workbook using the shared CLI writer (single-pass, correct headers)
+    import tempfile as _tempfile, shutil as _shutil, json as _json
+    tmpdir = Path(_tempfile.mkdtemp(prefix="iwealth_")).resolve()
+    try:
+        # Save the uploaded PDF so the writer can resolve paths & infer BS labels if needed
+        tmp_pdf_path = (tmpdir / f"{stem}.pdf")
+        tmp_pdf_path.write_bytes(pdf_bytes)
 
-        def _write_sheet(_name, _df):
-            safe = _name[:31] or "Sheet"
-            _df.to_excel(writer, sheet_name=safe, index=False)
-            ws = writer.book[safe]
-            header_font  = _F(bold=True, color=_hdr_fc)
-            header_fill  = _P("solid", fgColor=_hdr_fg)
-            header_align = _A(vertical="center", horizontal="center", wrap_text=True)
-            max_width = 60
-            for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
-                longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-                width = min(max(longest + 2, 10), max_width)
-                ws.column_dimensions[col[0].column_letter].width = width
-                for c in col[1:]:
-                    c.alignment = _A(vertical="top", wrap_text=True)
-            for cell in ws[1]:
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_align
-            ws.freeze_panes = "A2"
+        # Provide pages mapping so the writer can infer BS headers from PDF if periods are missing
+        json_name_tmpl = _mcc_mod.CFG.get("export", {}).get("combined_json", {}).get("filename", "{stem}_statements.json")
+        combined_obj = {"documents": {dt: {"pages": groups.get(dt, [])} for dt in groups}}
+        (tmpdir / json_name_tmpl.format(stem=stem)).write_text(_json.dumps(combined_obj), encoding="utf-8")
 
-        for _name in _order:
-            if _name in combined_sheets:
-                _write_sheet(_name, combined_sheets[_name]); _written.add(_name)
-        for _name, _df in combined_sheets.items():
-            if _name in _written:
-                continue
-            _write_sheet(_name, _df)
-
-        # Optional routing summary at end
-        env_flag = os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY")
-        include_summary = (
-            str(env_flag).strip().lower() in ("1","true","yes","y","on")
-            if env_flag is not None
-            else bool(_mcc_mod.EXPORT_INCLUDE_ROUTING_SUMMARY)
+        # Call the shared writer; it returns the xlsx path
+        xlsx_out = _mcc_mod._write_statements_workbook(
+            str(tmp_pdf_path),
+            stem,
+            combined_sheets,
+            routing_used=routing_used,
+            periods_by_doc=periods_hint
         )
-        if include_summary and routing_used:
-            rows = []
-            for dt in sorted(routing_used):
-                cfg = routing_used[dt]
-                rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra",""))])
-            pd.DataFrame(rows, columns=["Doc Type","Parser App ID","Model","Extra Accuracy"]).to_excel(writer, sheet_name="Routing Summary", index=False)
-            ws = writer.book["Routing Summary"]
-            for cell in ws[1]:
-                cell.font = _F(bold=True, color=_hdr_fc)
-                cell.fill = _P("solid", fgColor=_hdr_fg)
-                cell.alignment = _A(vertical="center", horizontal="center", wrap_text=True)
-            ws.freeze_panes = "A2"
-
-    out_buf.seek(0)
-    progress.progress(1.0, text=f"All done in {time.time()-t_overall:.1f}s")
-    status_write("✅ Excel ready to download.")
-    return out_buf.getvalue()
+        xlsx_bytes = Path(xlsx_out).read_bytes()
+        progress.progress(1.0, text=f"All done in {time.time()-t_overall:.1f}s")
+        status_write("✅ Excel ready to download.")
+        return xlsx_bytes
+    finally:
+        try:
+            _shutil.rmtree(tmpdir)
+        except Exception:
+            pass
 
 import io, textwrap
 import streamlit as st
