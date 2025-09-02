@@ -79,6 +79,24 @@ if generate_statements_excel is None:
             extra_accuracy=_mcc_mod.EXTRA_ACCURACY_SECOND,
         )
 
+        # Normalize second_res into a dict if API returned JSON text/bytes
+        if isinstance(second_res, (bytes, bytearray)):
+            try:
+                import json as _json
+                second_res = _json.loads(second_res.decode("utf-8", "ignore"))
+            except Exception:
+                second_res = {}
+        elif isinstance(second_res, str):
+            try:
+                import json as _json
+                second_res = _json.loads(second_res)
+            except Exception:
+                second_res = {}
+
+        if not isinstance(second_res, dict):
+            logging.getLogger(__name__).error("Second pass returned non-JSON for %s; aborting.", original_filename)
+            return None
+
         # 4) Classification (with fallback)
         pd_payload = (second_res.get("data", {}) or {}).get("parsedData", {})
         classification = []
@@ -149,17 +167,42 @@ if generate_statements_excel is None:
                 extra_accuracy=extra_acc,
             )
 
-            # Collect period labels for this doc_type (if provided by parser)
+            # Normalize group_res into a dict (handle text/bytes from API)
+            if isinstance(group_res, (bytes, bytearray)):
+                try:
+                    import json as _json
+                    group_res = _json.loads(group_res.decode("utf-8", "ignore"))
+                except Exception:
+                    group_res = {}
+            elif isinstance(group_res, str):
+                try:
+                    import json as _json
+                    group_res = _json.loads(group_res)
+                except Exception:
+                    group_res = {}
+
+            if not isinstance(group_res, dict):
+                logging.getLogger(__name__).warning("Third-pass '%s' returned non-JSON; skipping group.", doc_type)
+                continue
+
+            # Collect period metadata for this doc_type (id -> meta dict)
             try:
                 _periods = (((group_res or {}).get("data", {}) or {}).get("parsedData", {}) or {}).get("meta", {}).get("periods") or []
-                _labels = {}
+                _by_id = {}
                 for _p in _periods:
                     if isinstance(_p, dict):
                         _pid = str((_p.get("id") or "")).strip().lower()
                         if _pid:
-                            _labels[_pid] = (_p.get("label") or "")
-                if _labels:
-                    periods_hint[doc_type] = _labels
+                            _by_id[_pid] = {
+                                "label": _p.get("label") or "",
+                                "start_date": _p.get("start_date"),
+                                "end_date": _p.get("end_date"),
+                                "role": _p.get("role"),
+                                "is_cumulative": _is_true(_p.get("is_cumulative")),
+                                "is_audited": _is_true(_p.get("is_audited")),
+                            }
+                if _by_id:
+                    periods_hint[doc_type] = _by_id
             except Exception:
                 pass
         
@@ -379,17 +422,42 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 gdt = time.time() - g0
                 status_write(f"  ✓ {doc_type} done in {gdt:.1f}s")
 
-                # Collect period labels for this doc_type (if provided by parser)
+                # Normalize group_res into a dict (API may return JSON string/bytes)
+                if isinstance(group_res, (bytes, bytearray)):
+                    try:
+                        import json as _json
+                        group_res = _json.loads(group_res.decode("utf-8", "ignore"))
+                    except Exception:
+                        group_res = {}
+                elif isinstance(group_res, str):
+                    try:
+                        import json as _json
+                        group_res = _json.loads(group_res)
+                    except Exception:
+                        group_res = {}
+
+                if not isinstance(group_res, dict):
+                    status_write(f"  ✗ {doc_type} returned non-JSON response; skipping.")
+                    continue
+
+                # Collect period metadata for this doc_type (id -> meta dict)
                 try:
                     _periods = (((group_res or {}).get("data", {}) or {}).get("parsedData", {}) or {}).get("meta", {}).get("periods") or []
-                    _labels = {}
+                    _by_id = {}
                     for _p in _periods:
                         if isinstance(_p, dict):
                             _pid = str((_p.get("id") or "")).strip().lower()
                             if _pid:
-                                _labels[_pid] = (_p.get("label") or "")
-                    if _labels:
-                        periods_hint[doc_type] = _labels
+                                _by_id[_pid] = {
+                                    "label": _p.get("label") or "",
+                                    "start_date": _p.get("start_date"),
+                                    "end_date": _p.get("end_date"),
+                                    "role": _p.get("role"),
+                                    "is_cumulative": _is_true(_p.get("is_cumulative")),
+                                    "is_audited": _is_true(_p.get("is_audited")),
+                                }
+                    if _by_id:
+                        periods_hint[doc_type] = _by_id
                 except Exception:
                     pass
 
