@@ -2,7 +2,7 @@
   "file": "Karurvyasya_standalone_balance_sheet.pdf",
   "status": "ok",
   "data": {
-    "job_id": 2147622875,
+    "job_id": 2147624861,
     "job_status": "success",
     "parsedData": {
       "meta": {
@@ -22,7 +22,7 @@
           "audited_level": "Audited",
           "statement_date": "2025-03-31",
           "fiscal_year_end_month": "March",
-          "notes": ""
+          "notes": "Classification | PUBLIC"
         },
         "periods": [
           {
@@ -31,7 +31,7 @@
             "start_date": "",
             "end_date": "2025-03-31",
             "role": "Reporting period",
-            "is_cumulative": "No",
+            "is_cumulative": "Yes",
             "is_audited": "Yes"
           },
           {
@@ -39,8 +39,8 @@
             "label": "As on 31.03.2024",
             "start_date": "",
             "end_date": "2024-03-31",
-            "role": "Prior period",
-            "is_cumulative": "No",
+            "role": "Previous period",
+            "is_cumulative": "Yes",
             "is_audited": "Yes"
           }
         ]
@@ -183,6 +183,6 @@
     },
     "totalAttempts": 1,
     "total_pages": 1,
-    "initiated_at": 1756797923138
+    "initiated_at": 1756885613996
   }
 }

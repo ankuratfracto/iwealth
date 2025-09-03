@@ -53,8 +53,8 @@
     },
     "Standalone Balance Sheet": {
       "columns_before": [
-        "Particulars",
         "sr_no",
+        "Particulars",
         "c1",
         "c2",
         "c3",
@@ -69,8 +69,8 @@
         "c2": "As on 31.03.2024"
       },
       "columns_after": [
-        "Particulars",
         "sr_no",
+        "Particulars",
         "As on 31.03.2025",
         "As on 31.03.2024",
         "c3",
@@ -80,8 +80,8 @@
     },
     "Standalone Profit and Loss Statement": {
       "columns_before": [
-        "Particulars",
         "sr_no",
+        "Particulars",
         "c1",
         "c2",
         "c3",
@@ -103,8 +103,8 @@
         "c5": "Year ended 31-03-2024"
       },
       "columns_after": [
-        "Particulars",
         "sr_no",
+        "Particulars",
         "Quarter ended 31-03-2025",
         "Quarter ended 31-12-2024",
         "Quarter ended 31-03-2024",
@@ -115,12 +115,10 @@
     },
     "Standalone Cashflow": {
       "columns_before": [
-        "Particulars",
         "sr_no",
+        "Particulars",
         "c1",
-        "c2",
-        "c3",
-        "c4"
+        "c2"
       ],
       "period_label_keys": [
         "c1",
@@ -131,12 +129,10 @@
         "c2": "Year ended 31-03-2024"
       },
       "columns_after": [
-        "Particulars",
         "sr_no",
+        "Particulars",
         "Year ended 31-03-2025",
-        "Year ended 31-03-2024",
-        "c3",
-        "c4"
+        "Year ended 31-03-2024"
       ],
       "had_c_columns_before": true
     }
