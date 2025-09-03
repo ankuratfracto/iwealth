@@ -944,6 +944,40 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
                 for c in num_cols:
                     out.at[prev_idx, c] = None
 
+    # 3) Reorder columns: sr_no, Particulars, then c1..cN, then the rest
+    try:
+        import re
+        cols = list(out.columns)
+        # locate sr_no
+        sr = next((c for c in cols if str(c).strip().lower() == "sr_no"), None)
+        # locate/normalize particulars
+        part_aliases = {"particulars","particular","description","line item","line_item","account head","head"}
+        pc = next((c for c in cols if str(c).strip().lower() in part_aliases), None)
+        if pc and pc != "Particulars" and "Particulars" not in out.columns:
+            out.rename(columns={pc: "Particulars"}, inplace=True)
+            pc = "Particulars"
+        elif "Particulars" in out.columns:
+            pc = "Particulars"
+        # collect c1..cN (keep actual casing)
+        c_cols = sorted(
+            [c for c in out.columns if re.fullmatch(r"[cC]\d+", str(c))],
+            key=lambda x: int(re.findall(r"\d+", str(x))[0])
+        )
+        ordered = []
+        if sr and sr in out.columns:
+            ordered.append(sr)
+        if pc and pc in out.columns and pc not in ordered:
+            ordered.append(pc)
+        for c in c_cols:
+            if c not in ordered:
+                ordered.append(c)
+        for c in out.columns:
+            if c not in ordered:
+                ordered.append(c)
+        out = out.loc[:, ordered]
+    except Exception:
+        # never fail on ordering
+        pass
     return out
 
 def _extract_period_maps_from_payload(pd_payload: dict | list) -> tuple[dict[str, dict], dict[str, str]]:
@@ -1165,16 +1199,33 @@ def _normalize_df_for_excel(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame"
         return df
     df = sanitize_statement_df(doc_type, df)
 
-    # Ensure 'Particulars' (or alias) is first
-    cols = list(df.columns)
-    aliases = {"particulars","particular","description","line item","line_item","account head","head"}
-    part_col = next((c for c in cols if str(c).strip().lower() in aliases), None)
-    if not part_col:
-        part_col = "Particulars"
-        if part_col not in df.columns:
-            df.insert(0, part_col, "")
-    elif cols[0] != part_col:
-        df = df[[part_col] + [c for c in cols if c != part_col]]
+    # Reorder columns: sr_no, Particulars, then c1..cN, then the rest
+    try:
+        import re
+        cols = list(df.columns)
+        sr = next((c for c in cols if str(c).strip().lower() == "sr_no"), None)
+        part_aliases = {"particulars","particular","description","line item","line_item","account head","head"}
+        part_col = next((c for c in cols if str(c).strip().lower() in part_aliases), None)
+        if part_col and part_col != "Particulars":
+            df = df.rename(columns={part_col: "Particulars"})
+            part_col = "Particulars"
+        if not part_col and "Particulars" in df.columns:
+            part_col = "Particulars"
+        # collect c-columns
+        c_cols = sorted(
+            [c for c in df.columns if re.fullmatch(r"[cC]\\d+", str(c))],
+            key=lambda x: int(re.findall(r"\\d+", str(x))[0])
+        )
+        ordered = []
+        if sr:
+            ordered.append(sr)
+        if part_col and part_col not in ordered:
+            ordered.append(part_col)
+        ordered.extend([c for c in c_cols if c not in ordered])
+        ordered.extend([c for c in df.columns if c not in ordered])
+        df = df.loc[:, ordered]
+    except Exception:
+        pass
 
     # Coerce numbers in non-Particulars columns
     for c in df.columns:
