@@ -1,0 +1,45 @@
+{
+  "file": "Anupamrasayan_selected.pdf",
+  "status": "ok",
+  "data": {
+    "job_id": 2147624523,
+    "job_status": "success",
+    "parsedData": {
+      "organisation_type": {
+        "type": "Non Financial Company"
+      },
+      "page_wise_classification": [
+        {
+          "page_number": 1,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 2,
+          "doc_type": "Standalone Profit and Loss Statement",
+          "section_role": "full"
+        },
+        {
+          "page_number": 3,
+          "doc_type": "Others",
+          "section_role": "full"
+        },
+        {
+          "page_number": 4,
+          "doc_type": "Consolidated Profit and Loss Statement",
+          "section_role": "full"
+        },
+        {
+          "page_number": 5,
+          "doc_type": "Consolidated Profit and Loss Statement",
+          "section_role": "full",
+          "is_continuation": true,
+          "continuation_of": "Consolidated Profit and Loss Statement"
+        }
+      ]
+    },
+    "totalAttempts": 1,
+    "total_pages": 5,
+    "initiated_at": 1756880210234
+  }
+}

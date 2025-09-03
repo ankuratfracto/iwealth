@@ -619,12 +619,18 @@ def infer_doc_type_from_text(text: str) -> str | None:
     is_cons  = "consolidated" in s
     is_stand = "standalone" in s and not is_cons
     base: str | None = None
-    if ("cash flow" in s) or ("cashflows" in s) or ("cash flows" in s) or ("operating activities" in s and "cash" in s):
-        base = "Cashflow"
-    elif ("statement of assets and liabilities" in s) or ("balance sheet" in s):
+    # Prefer Balance Sheet, then P&L; treat Cashflow more strictly to avoid false positives
+    if ("statement of assets and liabilities" in s) or ("balance sheet" in s):
         base = "Balance Sheet"
-    elif ("statement of profit and loss" in s) or ("profit before" in s) or ("revenue from operations" in s):
+    elif ("statement of profit and loss" in s) or ("profit before" in s) or ("revenue from operations" in s) or ("earnings per share" in s):
         base = "Profit and Loss Statement"
+    elif (
+        "cash flow statement" in s
+        or "statement of cash flows" in s
+        or ("cash flow from" in s)
+        or (("operating activities" in s or "investing activities" in s or "financing activities" in s) and "cash flow" in s)
+    ):
+        base = "Cashflow"
     if not base:
         return None
     prefix = "Consolidated " if is_cons and not is_stand else ("Standalone " if is_stand else "")
