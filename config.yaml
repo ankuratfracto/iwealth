@@ -211,7 +211,7 @@ routing:                                # per (company_type × doc_type)
     # done
     standalone balance sheet:               { parser: "P4xzoeUxvctFNB2U", model: "gv1", extra: true }
     # done
-    consolidated profit and loss statement: { parser: "DNEQBl1VYnOyWGoF", model: "gv1", extra: true }
+    consolidated profit and loss statement: { parser: "yP3VBOPa0t6bNf3i", model: "gv1", extra: true }
     # done
     standalone profit and loss statement:   { parser: "YrXa2Jwuj3icIX1c", model: "gv1", extra: true }
     # done
