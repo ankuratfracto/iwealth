@@ -1611,7 +1611,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             PERIOD_LABELS_BY_DOC.setdefault(_k, {}).update(_v)
 
     debug_dump = {
-        "use_period_labels": bool(use_period_labels),
+        "use_period_labels": use_period_labels_cfg,
         "periods_by_doc_labels": _labels_only(period_by_doc),
         "sheets": {}
     }
