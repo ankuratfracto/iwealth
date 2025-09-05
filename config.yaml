@@ -199,9 +199,9 @@ routing:                                # per (company_type × doc_type)
   # doc_type keys must be lower-case canonical labels
   corporate:
     consolidated balance sheet:             { parser: "LAbiI5cdwNweFo7y", model: "gv1", extra: true }
-    
+    # done
     standalone balance sheet:               { parser: "lP6pytmenTWIbqTs", model: "gv1", extra: true }
-
+    # done
     consolidated profit and loss statement: { parser: "qzUWGg2koicgfDjS", model: "gv1", extra: true }
     # done
     standalone profit and loss statement:   { parser: "AVYIoCJI1gcmFxpr", model: "gv1", extra: true }
@@ -266,7 +266,11 @@ export:
       - Standalone Profit and Loss Statement
       - Standalone Cashflow
     include_routing_summary: true
-    use_period_labels: true
+    # You can use a boolean or a per-sheet map here.
+    # To keep Cashflow as c1, c2, ... while others use period labels:
+    use_period_labels:
+      default: true
+      Standalone Cashflow: false
     style:
       header_fill: "305496"          # hex (no #)
       header_font_color: "FFFFFF"

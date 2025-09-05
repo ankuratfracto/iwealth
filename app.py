@@ -393,7 +393,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     from PyPDF2 import PdfReader, PdfWriter
     def _is_true(x):
         return str(x).strip().lower() in ("true", "1", "yes", "y")
-    # 2) Select pages where has_table=true (fallback to old logic if none)
+    # 2) Select pages where has_table=true; also include pages whose headers clearly indicate a known doc type
     def _get_has_table(res: dict) -> bool:
         field = getattr(_mcc_mod, "HAS_TABLE_FIELD", "has_table")
         pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
@@ -404,16 +404,22 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
             return False
         return _is_true(pdict.get(field))
     selected_pages = [idx + 1 for idx, res in enumerate(results) if _get_has_table(res)]
+    # Heuristic include: any page where header text suggests a known doc type (BS/PL/Cashflow)
+    try:
+        page_texts = _mcc_mod.extract_page_texts_from_pdf_bytes(pdf_bytes)
+        header_pages = []
+        for i, txt in enumerate(page_texts, start=1):
+            inferred = _mcc_mod.infer_doc_type_from_text(txt)
+            inferred_norm = _mcc_mod.normalize_doc_type(inferred) if inferred else None
+            if inferred_norm and inferred_norm != "Others":
+                header_pages.append(i)
+        if header_pages:
+            selected_pages = sorted(set(selected_pages) | set(header_pages))
+    except Exception:
+        pass
     if not selected_pages:
-        status_write("⚠️ No pages flagged with tables — falling back to classification-based selection.")
-        selected_pages = [
-            idx + 1
-            for idx, res in enumerate(results)
-            if (
-                res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
-                or _is_true(res.get("data", {}).get("parsedData", {}).get("Has_multiple_sections"))
-            )
-        ]
+        status_write("⚠️ No pages flagged via table or headers — including all pages.")
+        selected_pages = list(range(1, len(results) + 1))
     # Optional neighbour expansion via env var (default 0 to keep strict table-only selection)
     try:
         _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", str(getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0))))

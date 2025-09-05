@@ -1540,7 +1540,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
 
     global PERIOD_LABELS_BY_DOC
 
-    use_period_labels = bool(CFG.get("export", {}).get("statements_workbook", {}).get("use_period_labels", True))
+    use_period_labels_cfg = CFG.get("export", {}).get("statements_workbook", {}).get("use_period_labels", True)
     xlsx_name_tmpl = CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
     out_path = Path(pdf_path).with_name(xlsx_name_tmpl.format(stem=stem))
     print(f"[Excel] ENTER _write_statements_workbook → out={out_path}", flush=True)
@@ -1555,7 +1555,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
     freeze_panes        = str(CFG.get("export", {}).get("statements_workbook", {}).get("freeze_panes", "A2"))
 
     # Discover/receive period labels
-    print(f"[Excel] use_period_labels={use_period_labels}", flush=True)
+    print(f"[Excel] use_period_labels_cfg={use_period_labels_cfg}", flush=True)
 
     period_by_doc = periods_by_doc or {}
     period_labels_by_doc = _labels_only(period_by_doc)
@@ -1614,6 +1614,30 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
     print(f"[Excel] sheet-order: {sheet_order}")
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        def _use_labels_for_sheet(name: str) -> bool:
+            # Accept: bool | {sheet_name: bool, ...}
+            val = use_period_labels_cfg
+            if isinstance(val, dict):
+                # Exact match first
+                if name in val:
+                    return bool(val[name])
+                # Try case-insensitive match
+                for k, v in val.items():
+                    try:
+                        if str(k).strip().lower() == str(name).strip().lower():
+                            return bool(v)
+                    except Exception:
+                        continue
+                # Support optional 'default' key
+                if "default" in val:
+                    try:
+                        return bool(val.get("default"))
+                    except Exception:
+                        return True
+                # Fallback default when dict provided but no key: True
+                return True
+            return bool(val)
+
         for sheet_name in sheet_order:
             df = combined_sheets.get(sheet_name)
             if df is None or getattr(df, "empty", True):
@@ -1629,9 +1653,8 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             except Exception:
                 pass
 
-            # Optionally rename c1..cN headers to actual period labels
-            # Optionally rename c1..cN headers to actual period labels
-            if use_period_labels:
+            # Optionally rename c1..cN headers to actual period labels (per-sheet toggle)
+            if _use_labels_for_sheet(sheet_name):
                 try:
                     # 0) Resolve labels for this sheet from (local → global) caches
                     period_labels = _pick_period_labels_for_sheet(
