@@ -1700,8 +1700,20 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                         rename_map: dict[str, str] = {}
                         for col in list(df.columns):
                             low = str(col).strip().lower()
-                            if re.fullmatch(r"c\d+", low) and low in period_labels and period_labels[low]:
-                                rename_map[col] = str(period_labels[low])
+                            # Accept both cN and pN ids; try cross-mapping if keys differ
+                            m = re.fullmatch(r"([cp])(\d+)", low)
+                            if not m:
+                                continue
+                            prefix, num = m.group(1), m.group(2)
+                            key = f"{prefix}{num}"
+                            alt = f"{'p' if prefix == 'c' else 'c'}{num}"
+                            label = None
+                            if key in period_labels and period_labels[key]:
+                                label = str(period_labels[key])
+                            elif alt in period_labels and period_labels[alt]:
+                                label = str(period_labels[alt])
+                            if label:
+                                rename_map[col] = label
 
                         logger.info("Excel rename [%s] using labels=%s → map=%s", sheet_name, sorted(period_labels.keys()), rename_map)
                         print(f"[Excel] rename-map for {sheet_name!r}: {rename_map}", flush=True)
