@@ -394,7 +394,12 @@ def _patch_sanitize_statement_df():
     exec(src_new, g)
     global_vars["sanitize_statement_df"] = g[fn.__name__]
 
-_patch_sanitize_statement_df()
+import os as _os
+if _os.getenv("IWEALTH_ENABLE_RUNTIME_PATCHES") == "1":
+    try:
+        _patch_sanitize_statement_df()
+    except Exception:
+        pass
 
 # --- Patch: Excel-writing functions (sanitize_statement_df → reorder_dataframe_sections_first)
 def _patch_excel_writers():
@@ -445,7 +450,11 @@ def _patch_excel_writers():
         except Exception:
             pass
 
-_patch_excel_writers()
+if _os.getenv("IWEALTH_ENABLE_RUNTIME_PATCHES") == "1":
+    try:
+        _patch_excel_writers()
+    except Exception:
+        pass
 
 
 def stamp_job_number(src_bytes: bytes, job_no: str, margin: int = 20) -> bytes:
@@ -1248,6 +1257,11 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
         out = out.loc[:, ordered]
     except Exception:
         # never fail on ordering
+        pass
+    # Ensure canonical section ordering before returning
+    try:
+        out = reorder_dataframe_sections_first(out)
+    except Exception:
         pass
     return out
 
