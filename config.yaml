@@ -198,8 +198,10 @@ company_type_prior:                     # soft prior; never a hard gate
 routing:                                # per (company_type × doc_type)
   # doc_type keys must be lower-case canonical labels
   corporate:
-    consolidated balance sheet:             { parser: "vVWw2KvKj4VOpLB5", model: "gv1", extra: true }
-    standalone balance sheet:               { parser: "P4xzoeUxvctFNB2U", model: "gv1", extra: true }
+    consolidated balance sheet:             { parser: "LAbiI5cdwNweFo7y", model: "gv1", extra: true }
+    
+    standalone balance sheet:               { parser: "lP6pytmenTWIbqTs", model: "gv1", extra: true }
+
     consolidated profit and loss statement: { parser: "qzUWGg2koicgfDjS", model: "gv1", extra: true }
     # done
     standalone profit and loss statement:   { parser: "AVYIoCJI1gcmFxpr", model: "gv1", extra: true }
