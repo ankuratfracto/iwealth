@@ -239,6 +239,9 @@ grouping:
   absorb_others_between_same_type: true
   neighbor_radius: 1                 # smoothing window when building ranges
   inherit_scope_on_continuation: true
+  # When true, grouping will NOT override second-pass classification using
+  # header text heuristics; doc types will reflect the classifier exactly.
+  disable_header_override: true
 
 validation:
   enable: true

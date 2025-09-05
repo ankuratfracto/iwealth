@@ -992,11 +992,13 @@ def build_groups(
     # Guard: prevent header-based override of "Others" if config says so
     prevent_override_others = bool(CFG.get("grouping", {}).get("prevent_override_when_others", True))
     page_texts = extract_page_texts_from_pdf_bytes(original_pdf_bytes)
+    disable_header_override = bool(CFG.get("grouping", {}).get("disable_header_override", False))
     for orig in selected_pages:
         inferred = infer_doc_type_from_text(page_texts[orig - 1] if 0 <= orig - 1 < len(page_texts) else "")
         if inferred:
             inferred = normalize_doc_type(inferred)
         if orig not in doc_by_page:
+            # If classifier didn't label this page, fall back to header inference
             doc_by_page[orig] = inferred or "Others"
         else:
             current_label = doc_by_page[orig]
@@ -1004,16 +1006,18 @@ def build_groups(
             if (inherit_on_cont and orig in cont_orig_pages) or (orig in has_two_orig_pages) or (prevent_override_others and current_label == "Others"):
                 pass  # keep classifier/primary label
             else:
-                # If classifier says Balance Sheet but header screams Cashflow (or vice-versa), trust header.
-                current = _canon_text(current_label)
-                if inferred and _canon_text(inferred) not in (current,):
-                    kinds = lambda s: ("cash" if "cash" in s else "pl" if "loss" in s or "profit" in s else "bs" if "balance" in s or "assets" in s else "other")
-                    if kinds(current) != kinds(_canon_text(inferred)):
-                        try:
-                            logger.info("Header override @p%d: %s → %s", orig, current_label, inferred)
-                        except Exception:
-                            pass
-                        doc_by_page[orig] = inferred
+                # Optionally disable header-based overrides to honor classification exactly
+                if not disable_header_override:
+                    # If classifier says Balance Sheet but header screams Cashflow (or vice-versa), trust header.
+                    current = _canon_text(current_label)
+                    if inferred and _canon_text(inferred) not in (current,):
+                        kinds = lambda s: ("cash" if "cash" in s else "pl" if "loss" in s or "profit" in s else "bs" if "balance" in s or "assets" in s else "other")
+                        if kinds(current) != kinds(_canon_text(inferred)):
+                            try:
+                                logger.info("Header override @p%d: %s → %s", orig, current_label, inferred)
+                            except Exception:
+                                pass
+                            doc_by_page[orig] = inferred
 
     # 3) Absorb 'Others' *only when sandwiched* between same-type pages
     pages_sorted = sorted(doc_by_page)
