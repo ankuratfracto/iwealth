@@ -183,6 +183,271 @@ from PyPDF2 import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 
 # ─── PDF Stamping Helper ──────────────────────────────────────────────
+
+import re as _re
+
+def reorder_dataframe_sections_first(df):
+    """
+    Ensure each section's header row appears before its break-up lines, with totals last.
+
+    A row is considered a *header* if EITHER:
+      • sr_no looks like a top-level number (e.g., 1, 1.0, 1.00, 12.30), OR
+      • it’s a label-only line (non-empty name column, NO numeric amounts), and not a Total/Subtotal.
+
+    Totals/Subtotals are always pushed to the end of their section.
+    """
+    try:
+        import pandas as _pd  # noqa: F401
+    except Exception:
+        return df
+    if df is None or getattr(df, "empty", True):
+        return df
+
+    cols = list(df.columns)
+
+    # 1) Identify the "name" / particulars column (case-insensitive)
+    name_col = None
+    for c in cols:
+        if str(c).strip().lower() in {
+            "particulars", "description", "item", "line_item", "account", "head", "details"
+        }:
+            name_col = c
+            break
+    if name_col is None:
+        return df  # no safe way to reorder
+
+    # 2) Numeric columns (c1..cN or columns containing 'amount'/'value')
+    num_cols = [c for c in cols if _re.fullmatch(r'(?i)c\d+', str(c))
+                or ("amount" in str(c).lower())
+                or ("value" in str(c).lower())]
+    if not num_cols:
+        meta = {name_col, "sr_no", "srno", "serial", "note"}
+        num_cols = [c for c in cols if str(c).lower() not in {m.lower() for m in meta}]
+
+    def _is_numlike(v):
+        if v is None:
+            return False
+        if isinstance(v, str) and v.strip() in {"", "-", "–", "—", "na", "n/a", "nil"}:
+            return False
+        try:
+            float(str(v).replace(",", ""))
+            return True
+        except Exception:
+            return False
+
+    n = len(df)
+    is_header = [False]*n
+    is_total  = [False]*n
+
+    # Accept many variants of the serial column (regex) and provide a fallback
+    def _norm(s: str) -> str:
+        return str(s or "").strip().lower()
+
+    sr_cols = []
+    for c in cols:
+        nm = _norm(c)
+        if _re.search(r'^(sr\.?\s*no\.?|s\.?\s*no\.?|serial(?:\s*no)?)$', nm):
+            sr_cols.append(c)
+        elif nm in {"sr_no","srno","serial","serial no","serial_no","s no","s. no.","sno","s.no","sr. no.","sr no"}:
+            sr_cols.append(c)
+    sr_col = sr_cols[0] if sr_cols else None
+
+    # Fallback: if no explicit sr_no column, try using the left-most column if many values look like 1, 1.0, 1.00, 12.30
+    if sr_col is None and len(cols) > 0:
+        first_col = cols[0]
+        try:
+            series = df[first_col].dropna().astype(str).str.strip()
+            frac = (series.str.fullmatch(r'\d+(?:\.\d+)?').sum()) / max(len(series), 1)
+            if frac >= 0.25:  # at least 25% look like serials → treat as sr_no
+                sr_col = first_col
+        except Exception:
+            pass
+
+    def cell(i, c):
+        try:
+            return df.iloc[i][c]
+        except Exception:
+            return None
+
+    for i in range(n):
+        name = str(cell(i, name_col) or "").strip()
+        tot = bool(_re.match(r'^\s*(total|subtotal|grand\s+total)\b', name.lower()))
+        is_total[i] = tot
+
+        # Any numeric value in amount columns?
+        num_present = any(_is_numlike(cell(i, c)) for c in num_cols)
+
+        # Header detection:
+        #  (a) numeric-style sr_no (1, 1.0, 1.00, 12.30) → header (even if numbers present)
+        #  (b) non-empty name with NO numbers and not a total → header
+        sr_val = (str(cell(i, sr_col)).strip() if sr_col else "")
+        header_by_sr = bool(_re.fullmatch(r'\d+(?:\.\d+)?', sr_val))
+        header_by_name_no_num = (name != "") and (not num_present) and (not tot)
+
+        is_header[i] = header_by_sr or header_by_name_no_num
+
+    out_idx, used = [], [False]*n
+
+    def append_details(start, end):
+        if start > end:
+            return
+        block = [j for j in range(start, end+1) if not is_header[j] and not used[j]]
+        non_tot = [j for j in block if not is_total[j]]
+        tots    = [j for j in block if is_total[j]]
+        for j in non_tot + tots:
+            out_idx.append(j); used[j] = True
+
+    i = 0
+    while i < n:
+        if used[i]:
+            i += 1; continue
+        if is_header[i]:
+            out_idx.append(i); used[i] = True
+            j = i + 1
+            while j < n and not is_header[j]:
+                j += 1
+            append_details(i+1, j-1)
+            i = j
+        else:
+            # break-up rows before a header → bring the next header forward, then its details
+            k = i
+            while k < n and not is_header[k]:
+                k += 1
+            if k < n:
+                out_idx.append(k); used[k] = True
+                append_details(i, k-1)
+                j = k + 1
+                while j < n and not is_header[j]:
+                    j += 1
+                append_details(k+1, j-1)
+                i = j
+            else:
+                append_details(i, n-1)
+                i = n
+
+    # Optional debug: set FRACTO_DEBUG_ORDER=1 to see header/total counts and a small preview
+    import os as _os
+    if _os.getenv("FRACTO_DEBUG_ORDER") == "1":
+        try:
+            preview_cols = [name_col]
+            if sr_col and sr_col != name_col:
+                preview_cols = [sr_col] + preview_cols
+            print("[ORDERDBG] headers=", sum(is_header), "totals=", sum(is_total), flush=True)
+            print("[ORDERDBG] preview (pre):", df[preview_cols].head(12).to_dict("records"), flush=True)
+        except Exception:
+            pass
+
+    try:
+        df_out = df.iloc[out_idx].reset_index(drop=True)
+        import os as _os
+        if _os.getenv("FRACTO_DEBUG_ORDER") == "1":
+            try:
+                preview_cols = [name_col]
+                if sr_col and sr_col != name_col:
+                    preview_cols = [sr_col] + preview_cols
+                print("[ORDERDBG] preview (post):", df_out[preview_cols].head(12).to_dict("records"), flush=True)
+            except Exception:
+                pass
+        return df_out
+    except Exception:
+        return df
+
+
+# --- Patch: ensure reorder is applied before any DataFrame leaves sanitization
+
+# Try to patch sanitize_statement_df to reorder before every return
+import inspect
+import types
+import sys
+
+def _patch_sanitize_statement_df():
+    import re as _re
+    import builtins
+    global_vars = globals()
+    # Find the function
+    fn = global_vars.get("sanitize_statement_df")
+    if fn is None:
+        # Try to find in __main__ or other imports
+        try:
+            import __main__
+            fn = getattr(__main__, "sanitize_statement_df", None)
+        except Exception:
+            fn = None
+    if fn is None:
+        return  # nothing to patch
+    src = inspect.getsource(fn)
+    lines = src.splitlines()
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith("return df"):
+            indent = line[:line.find('return')]
+            new_lines.append(f"{indent}df = reorder_dataframe_sections_first(df)")
+            new_lines.append(line)
+        else:
+            new_lines.append(line)
+    # Compile new function
+    src_new = "\n".join(new_lines)
+    # Prepare globals for exec
+    g = fn.__globals__.copy()
+    g["reorder_dataframe_sections_first"] = reorder_dataframe_sections_first
+    # Note: exec in the right context
+    exec(src_new, g)
+    global_vars["sanitize_statement_df"] = g[fn.__name__]
+
+_patch_sanitize_statement_df()
+
+# --- Patch: Excel-writing functions (sanitize_statement_df → reorder_dataframe_sections_first)
+def _patch_excel_writers():
+    import inspect
+    import sys
+    global_vars = globals()
+    # Find all functions that look like Excel writers
+    for name, fn in list(global_vars.items()):
+        if not callable(fn) or not inspect.isfunction(fn):
+            continue
+        src = None
+        try:
+            src = inspect.getsource(fn)
+        except Exception:
+            continue
+        if "to_excel" not in src and "save_workbook" not in src and "write" not in name:
+            continue
+        # Look for calls to sanitize_statement_df
+        pat = re.compile(r"(df_[a-zA-Z0-9_]*\s*=\s*)?sanitize_statement_df\(([^)]+)\)")
+        matches = list(pat.finditer(src))
+        if not matches:
+            continue
+        # Patch after each call
+        lines = src.splitlines()
+        new_lines = []
+        for idx, line in enumerate(lines):
+            new_lines.append(line)
+            m = pat.search(line)
+            if m:
+                # Figure out the variable assigned, if any
+                assign = m.group(1)
+                varname = None
+                if assign:
+                    varname = assign.split("=")[0].strip()
+                else:
+                    # try to extract from inside call, e.g. return sanitize_statement_df(...) → can't patch
+                    continue
+                indent = line[:line.find(m.group(0))]
+                # Insert reorder after sanitize_statement_df
+                new_lines.append(f"{indent}{varname} = reorder_dataframe_sections_first({varname})")
+        # Compile new function
+        src_new = "\n".join(new_lines)
+        g = fn.__globals__.copy()
+        g["reorder_dataframe_sections_first"] = reorder_dataframe_sections_first
+        try:
+            exec(src_new, g)
+            global_vars[name] = g[fn.__name__]
+        except Exception:
+            pass
+
+_patch_excel_writers()
+
+
 def stamp_job_number(src_bytes: bytes, job_no: str, margin: int = 20) -> bytes:
     """
     Return new PDF bytes with an extra *margin* (pt) added to the top
@@ -881,17 +1146,16 @@ def _extract_rows(parsed: Any, doc_type: str | None = None) -> List[Dict[str, An
 
     def _walk(x: Any) -> None:
         if isinstance(x, dict):
-            # Walk children first (skip scaffolding keys)
+            # Header-first: add this node as a potential row *before* visiting children.
+            _add_row(x)
             for k, v in x.items():
                 if k in {"meta", "statement_type", "framework", "scope", "report"}:
                     continue
                 if isinstance(v, (dict, list)):
                     _walk(v)
-            # Consider this dict as a potential row
-            _add_row(x)
         elif isinstance(x, list):
-            for el in x:
-                _walk(el)
+            for it in x:
+                _walk(it)
         else:
             return
 
@@ -906,6 +1170,7 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
     """
     import pandas as pd  # lazy import
     if df is None or df.empty:
+        df = reorder_dataframe_sections_first(df)
         return df
 
     out = df.copy()
@@ -2875,6 +3140,7 @@ def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes
             df = pd.DataFrame(rows, columns=all_keys)
             # Light cleanups
             df = sanitize_statement_df(doc_type, df)
+            df = reorder_dataframe_sections_first(df)
             combined_sheets[doc_type] = df
 
     if not combined_sheets:

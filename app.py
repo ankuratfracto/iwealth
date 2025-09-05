@@ -217,6 +217,7 @@ if generate_statements_excel is None:
                 rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                 df = _pd.DataFrame(rows, columns=all_keys)
                 df = _mcc_mod.sanitize_statement_df(doc_type, df)
+                df = reorder_dataframe_sections_first(df)
                 combined_sheets[doc_type] = df
 
         if not combined_sheets:
@@ -252,6 +253,121 @@ if generate_statements_excel is None:
                 pass
 
 # --- Statements Excel with progress and concurrency ---
+import re as _re
+
+def reorder_dataframe_sections_first(df):
+    """
+    Ensure each section's header row appears before its break-up lines, with totals last.
+    Heuristics:
+      • A "header" row has a non-empty name column (Particulars/Description/etc.)
+        and NO numeric values; it's not a Total/Subtotal.
+      • "Total/Subtotal/Grand total" rows are pushed to the end of their section.
+    """
+    try:
+        import pandas as _pd
+    except Exception:
+        return df
+    if df is None or getattr(df, "empty", True):
+        return df
+
+    cols = list(df.columns)
+
+    # 1) Find the "name" column
+    name_col = None
+    for c in cols:
+        if str(c).strip().lower() in {"particulars","description","item","line_item","account","head","details"}:
+            name_col = c
+            break
+    if name_col is None:
+        return df  # no safe way to reorder
+
+    # 2) Numeric columns (c1..cN or columns containing amount/value)
+    num_cols = [c for c in cols if _re.fullmatch(r'(?i)c\d+', str(c)) or ("amount" in str(c).lower()) or ("value" in str(c).lower())]
+    if not num_cols:
+        meta = {name_col, "sr_no", "srno", "serial", "note"}
+        num_cols = [c for c in cols if str(c).lower() not in {m.lower() for m in meta}]
+
+    def _is_numlike(v):
+        if v is None:
+            return False
+        if isinstance(v, str) and v.strip() in {"", "-", "–", "—", "na", "n/a", "nil"}:
+            return False
+        try:
+            float(str(v).replace(",", ""))
+            return True
+        except Exception:
+            return False
+
+    n = len(df)
+    is_header = [False]*n
+    is_total  = [False]*n
+
+    # optional sr_no helpers
+    sr_cols = [c for c in cols if str(c).strip().lower() in {"sr_no","srno","serial","s no","s. no."}]
+    sr_col = sr_cols[0] if sr_cols else None
+
+    def cell(i, c):
+        try:
+            return df.iloc[i][c]
+        except Exception:
+            return None
+
+    for i in range(n):
+        name = str(cell(i, name_col) or "").strip()
+        tot = bool(_re.match(r'^\s*(total|subtotal|grand\s+total)\b', name.lower()))
+        is_total[i] = tot
+        has_num = any(_is_numlike(cell(i, c)) for c in num_cols)
+
+        hdr = (name != "") and (not has_num) and (not tot)
+        if not hdr and sr_col:
+            sr = str(cell(i, sr_col) or "").strip()
+            if sr and _re.fullmatch(r'(?i)([ivxlcdm]+|\d+\.|[A-Za-z]\))', sr) and (not has_num):
+                hdr = True
+        is_header[i] = hdr
+
+    out_idx, used = [], [False]*n
+
+    def append_details(start, end):
+        if start > end: return
+        block = [i for i in range(start, end+1) if not is_header[i] and not used[i]]
+        non_tot = [i for i in block if not is_total[i]]
+        tots    = [i for i in block if is_total[i]]
+        for i in non_tot + tots:
+            out_idx.append(i); used[i] = True
+
+    i = 0
+    while i < n:
+        if used[i]:
+            i += 1; continue
+        if is_header[i]:
+            out_idx.append(i); used[i] = True
+            j = i + 1
+            while j < n and not is_header[j]:
+                j += 1
+            append_details(i+1, j-1)
+            i = j
+        else:
+            # break-up before header → move next header before this block
+            k = i
+            while k < n and not is_header[k]:
+                k += 1
+            if k < n:
+                out_idx.append(k); used[k] = True
+                append_details(i, k-1)       # details that came before header
+                j = k + 1
+                while j < n and not is_header[j]:
+                    j += 1
+                append_details(k+1, j-1)     # details that follow header
+                i = j
+            else:
+                append_details(i, n-1)
+                i = n
+
+    try:
+        return df.iloc[out_idx].reset_index(drop=True)
+    except Exception:
+        return df
+
 import os, time
 
 def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename: str, progress, status_write):
@@ -479,6 +595,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                 df_ = pd.DataFrame(rows, columns=all_keys)
                 df_ = _mcc_mod.sanitize_statement_df(doc_type, df_)
+                df_ = reorder_dataframe_sections_first(df_)
                 combined_sheets[doc_type] = df_
 
     if not combined_sheets:

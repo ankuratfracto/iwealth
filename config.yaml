@@ -14,7 +14,7 @@ concurrency:
 
 passes:
   first:
-    parser_app: "jIsqGEQwxdqZR35R"     # default first-pass parser
+    parser_app: "knAYXPWe8roOzpk7" #"jIsqGEQwxdqZR35R"     # default first-pass parser
     model: "tv6"
     extra_accuracy: false
     selection:
