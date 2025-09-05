@@ -217,7 +217,13 @@ if generate_statements_excel is None:
                 rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                 df = _pd.DataFrame(rows, columns=all_keys)
                 df = _mcc_mod.sanitize_statement_df(doc_type, df)
-                df = reorder_dataframe_sections_first(df)
+                # Preserve LLM parse order by default; enable reorder only via env flag
+                try:
+                    import os as _os
+                    if str(_os.getenv("IWEALTH_ENABLE_REORDER", "0")).strip() in {"1", "true", "yes"}:
+                        df = reorder_dataframe_sections_first(df)
+                except Exception:
+                    pass
                 combined_sheets[doc_type] = df
 
         if not combined_sheets:
@@ -595,7 +601,13 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                 df_ = pd.DataFrame(rows, columns=all_keys)
                 df_ = _mcc_mod.sanitize_statement_df(doc_type, df_)
-                df_ = reorder_dataframe_sections_first(df_)
+                # Preserve LLM order; only reorder when explicitly enabled
+                try:
+                    import os as _os
+                    if str(_os.getenv("IWEALTH_ENABLE_REORDER", "0")).strip() in {"1", "true", "yes"}:
+                        df_ = reorder_dataframe_sections_first(df_)
+                except Exception:
+                    pass
                 combined_sheets[doc_type] = df_
 
     if not combined_sheets:

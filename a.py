@@ -1179,7 +1179,6 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
     """
     import pandas as pd  # lazy import
     if df is None or df.empty:
-        df = reorder_dataframe_sections_first(df)
         return df
 
     out = df.copy()
@@ -1258,9 +1257,11 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
     except Exception:
         # never fail on ordering
         pass
-    # Ensure canonical section ordering before returning
+    # Preserve LLM order by default; caller can enable reorder via env
     try:
-        out = reorder_dataframe_sections_first(out)
+        import os as _os
+        if str(_os.getenv("IWEALTH_ENABLE_REORDER", "0")).strip() in {"1", "true", "yes"}:
+            out = reorder_dataframe_sections_first(out)
     except Exception:
         pass
     return out
@@ -3154,7 +3155,13 @@ def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes
             df = pd.DataFrame(rows, columns=all_keys)
             # Light cleanups
             df = sanitize_statement_df(doc_type, df)
-            df = reorder_dataframe_sections_first(df)
+            # Keep original LLM order unless explicitly enabled via env
+            try:
+                import os as _os
+                if str(_os.getenv("IWEALTH_ENABLE_REORDER", "0")).strip() in {"1", "true", "yes"}:
+                    df = reorder_dataframe_sections_first(df)
+            except Exception:
+                pass
             combined_sheets[doc_type] = df
 
     if not combined_sheets:
