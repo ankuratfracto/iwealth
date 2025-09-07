@@ -4,7 +4,7 @@ project: iwealth
 api:
   endpoint: "https://prod-ml.fracto.tech/upload-file-smart-ocr"
   api_key_env: "FRACTO_API_KEY"     # read the key from env at runtime
-  api_key: "KUS-KUS-D09D77-709841-JXR4YETC"  # fallback if env var not set
+  api_key: "IWE-BHA-84AD66-MLMPC2-7XU5Z196"  # fallback if env var not set
   timeout_seconds: 300              # per-request timeout
 
 concurrency:
@@ -14,7 +14,7 @@ concurrency:
 
 passes:
   first:
-    parser_app: "knAYXPWe8roOzpk7" #"jIsqGEQwxdqZR35R"     # default first-pass parser
+    parser_app: "jIsqGEQwxdqZR35R" #"jIsqGEQwxdqZR35R"     # default first-pass parser
     model: "tv6"
     extra_accuracy: false
     selection:
@@ -207,7 +207,9 @@ routing:                                # per (company_type × doc_type)
     standalone profit and loss statement:   { parser: "AVYIoCJI1gcmFxpr", model: "gv1", extra: true }
     # done
     consolidated cashflow:                  { parser: "LOKukjCXgxKDFaBF", model: "gv1", extra: true }
+    # done
     standalone cashflow:                    { parser: "LOKukjCXgxKDFaBF", model: "gv1", extra: true }
+    # done
   bank:
     consolidated balance sheet:             { parser: "vVWw2KvKj4VOpLB5", model: "gv1", extra: true }
     # done
@@ -217,8 +219,10 @@ routing:                                # per (company_type × doc_type)
     # done
     standalone profit and loss statement:   { parser: "YrXa2Jwuj3icIX1c", model: "gv1", extra: true }
     # done
-    consolidated cashflow:                  { parser: "utsRkUphzettfKd0", model: "gv1", extra: true }
-    standalone cashflow:                    { parser: "VGAEODaeYv4nr3fM", model: "gv1", extra: true }
+    consolidated cashflow:                  { parser: "zIPeLWCJmfLlseOb", model: "gv1", extra: true }
+    # done
+    standalone cashflow:                    { parser: "o2JM9jlI6E0ortkp", model: "gv1", extra: true }
+    # done
   nbfc: {}
   insurance: {}
   fallback_order:
