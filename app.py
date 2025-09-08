@@ -747,50 +747,64 @@ st.markdown(f"""
         color: #222222 !important;
         border: 1px solid #CCCCCC !important;
     }}
-    /* Duplicate overrides in dark‑mode query */
+    /* Dark mode: follow system preference */
     @media (prefers-color-scheme: dark) {{
+        /* Base surfaces and text */
         html, body, .stApp, .block-container {{
-            background-color: #FFFFFF !important;
-            color: #222222 !important;
+            background-color: #0E1117 !important; /* Streamlit dark base */
+            color: #E5E7EB !important;            /* slate-200 */
         }}
-        label, .stMarkdown, .stSubheader, .stHeader, .stTextInput label {{
-            color: #222222 !important;
+        .stApp {{
+            background: #0E1117 !important;
+        }}
+        h1, h2, h3, h4, h5, h6 {{
+            color: #F9FAFB !important;            /* near-white headers */
+        }}
+        p, span, div, label {{
+            color: #E5E7EB !important;
+        }}
+
+        /* Inputs */
+        .stTextInput > div > div > input,
+        textarea {{
+            background-color: #111827 !important; /* slate-900 */
+            color: #E5E7EB !important;
+            border: 1px solid #374151 !important; /* slate-700 */
         }}
         input[type="password"] {{
-            background-color: #FFFFFF !important;
-            color: #222222 !important;
-            border: 1px solid #CCCCCC !important;
+            background-color: #111827 !important;
+            color: #E5E7EB !important;
+            border: 1px solid #374151 !important;
         }}
-    }}
-    /* Force light theme when user is in dark mode */
-    @media (prefers-color-scheme: dark) {{
-        .stApp {{
-            background: #FFFFFF !important;
-        }}
-        h1, h2, h3, h4, h5, h6, p, label, span, div, input, textarea {{
-            color: #222222 !important;
-        }}
-        /* keep our primary buttons */
-        button[kind="primary"] {{
-            background-color: #00AB6B !important;
-            color: #fff !important;
-        }}
-        button[kind="primary"]:hover {{
-            background-color: #00895A !important;
-        }}
-        /* inputs */
-        .stTextInput > div > div > input {{
-            background-color: #ffffff !important;
-            color: #222222 !important;
-        }}
-        /* uploader stays light */
+
+        /* File uploader */
         .stFileUploader > div > div {{
-            background-color: #ffffff !important;
-            border: 1px solid #CCCCCC !important;
-            color: #222222 !important;
+            background-color: #111827 !important;
+            border: 1px solid #374151 !important;
+            color: #E5E7EB !important;
         }}
         .stFileUploader label {{
-            color: #222222 !important;
+            color: #E5E7EB !important;
+        }}
+
+        /* Buttons (keep brand green) */
+        button[kind="primary"], .stButton button {{
+            background-color: #00AB6B !important;
+            color: #FFFFFF !important;
+            border: 0 !important;
+        }}
+        button[kind="primary"]:hover, .stButton button:hover {{
+            background-color: #00895A !important;
+        }}
+
+        /* Cards and panels */
+        .card {{
+            background: #1F2937;                   /* slate-800 */
+            border: 1px solid #374151;            /* slate-700 */
+            box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+        }}
+        .card h4 {{
+            color: #34D399;                        /* teal-300 */
         }}
     }}
     /* Force hover shadow on cards */
