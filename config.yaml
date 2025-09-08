@@ -34,7 +34,7 @@ passes:
         - all_pages                    # fallback 2: include everything
   second:
     parser_app: "pDJoI1nbLM6TvD5u"     # second-pass (selected.pdf) classifier
-    model: "gv1"
+    model: "gv3"
     extra_accuracy: true
     save_selected_json: true
     selected_json_name: "{stem}_selected_ocr.json"
@@ -198,30 +198,30 @@ company_type_prior:                     # soft prior; never a hard gate
 routing:                                # per (company_type × doc_type)
   # doc_type keys must be lower-case canonical labels
   corporate:
-    consolidated balance sheet:             { parser: "LAbiI5cdwNweFo7y", model: "gv1", extra: true }
+    consolidated balance sheet:             { parser: "LAbiI5cdwNweFo7y", model: "gv3", extra: true }
     # done
-    standalone balance sheet:               { parser: "lP6pytmenTWIbqTs", model: "gv1", extra: true }
+    standalone balance sheet:               { parser: "lP6pytmenTWIbqTs", model: "gv3", extra: true }
     # done
-    consolidated profit and loss statement: { parser: "qzUWGg2koicgfDjS", model: "gv1", extra: true }
+    consolidated profit and loss statement: { parser: "qzUWGg2koicgfDjS", model: "gv3", extra: true }
     # done
-    standalone profit and loss statement:   { parser: "AVYIoCJI1gcmFxpr", model: "gv1", extra: true }
+    standalone profit and loss statement:   { parser: "AVYIoCJI1gcmFxpr", model: "gv3", extra: true }
     # done
-    consolidated cashflow:                  { parser: "LOKukjCXgxKDFaBF", model: "gv1", extra: true }
+    consolidated cashflow:                  { parser: "LOKukjCXgxKDFaBF", model: "gv3", extra: true }
     # done
-    standalone cashflow:                    { parser: "LOKukjCXgxKDFaBF", model: "gv1", extra: true }
+    standalone cashflow:                    { parser: "LOKukjCXgxKDFaBF", model: "gv3", extra: true }
     # done
   bank:
-    consolidated balance sheet:             { parser: "vVWw2KvKj4VOpLB5", model: "gv1", extra: true }
+    consolidated balance sheet:             { parser: "vVWw2KvKj4VOpLB5", model: "gv3", extra: true }
     # done
-    standalone balance sheet:               { parser: "P4xzoeUxvctFNB2U", model: "gv1", extra: true }
+    standalone balance sheet:               { parser: "P4xzoeUxvctFNB2U", model: "gv3", extra: true }
     # done
-    consolidated profit and loss statement: { parser: "yP3VBOPa0t6bNf3i", model: "gv1", extra: true }
+    consolidated profit and loss statement: { parser: "yP3VBOPa0t6bNf3i", model: "gv3", extra: true }
     # done
-    standalone profit and loss statement:   { parser: "YrXa2Jwuj3icIX1c", model: "gv1", extra: true }
+    standalone profit and loss statement:   { parser: "YrXa2Jwuj3icIX1c", model: "gv3", extra: true }
     # done
-    consolidated cashflow:                  { parser: "zIPeLWCJmfLlseOb", model: "gv1", extra: true }
+    consolidated cashflow:                  { parser: "zIPeLWCJmfLlseOb", model: "gv3", extra: true }
     # done
-    standalone cashflow:                    { parser: "o2JM9jlI6E0ortkp", model: "gv1", extra: true }
+    standalone cashflow:                    { parser: "o2JM9jlI6E0ortkp", model: "gv3", extra: true }
     # done
   nbfc: {}
   insurance: {}
