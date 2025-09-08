@@ -15,8 +15,8 @@ concurrency:
 passes:
   first:
     parser_app: "jIsqGEQwxdqZR35R" #"jIsqGEQwxdqZR35R"     # default first-pass parser
-    model: "tv6"
-    extra_accuracy: false
+    model: "gv1"
+    extra_accuracy: true
     selection:
       use_has_table: true
       has_table_field: "has_table"     # field under parsedData (legacy; kept for fallback)
@@ -34,7 +34,7 @@ passes:
         - all_pages                    # fallback 2: include everything
   second:
     parser_app: "pDJoI1nbLM6TvD5u"     # second-pass (selected.pdf) classifier
-    model: "gv1"
+    model: "tv6"
     extra_accuracy: false
     save_selected_json: true
     selected_json_name: "{stem}_selected_ocr.json"
