@@ -15,8 +15,8 @@ concurrency:
 passes:
   first:
     parser_app: "jIsqGEQwxdqZR35R" #"jIsqGEQwxdqZR35R"     # default first-pass parser
-    model: "gv1"
-    extra_accuracy: true
+    model: "tv7"
+    extra_accuracy: false
     selection:
       use_has_table: true
       has_table_field: "has_table"     # field under parsedData (legacy; kept for fallback)
