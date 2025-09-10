@@ -2345,6 +2345,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                 print("[Excel] WARN: workbook saved with fewer sheets than expected — rewriting in simple mode…", flush=True)
                 import pandas as _pd
                 with _pd.ExcelWriter(out_path, engine="openpyxl") as _w2:
+                    # 1) Statement sheets (simple write, ordered)
                     for sname in sheet_order:
                         df0 = combined_sheets.get(sname)
                         if df0 is None or getattr(df0, 'empty', True):
@@ -2356,6 +2357,73 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                         df2 = _sanitize_df_for_excel(df2)
                         _safe = (sname[:31] or 'Sheet')
                         df2.to_excel(_w2, sheet_name=_safe, index=False)
+
+                    # 2) Validation sheet (optional, de-duplicated)
+                    try:
+                        if INCLUDE_VALIDATION_SHEET and validation_rows:
+                            val_cols = [
+                                "Doc Type", "Particulars", "Section", "Column", "Sum of Items", "Reported Total", "Difference", "Status", "Tolerance", "Details"
+                            ]
+                            (_pd.DataFrame(validation_rows, columns=val_cols)
+                                .drop_duplicates()
+                                .to_excel(_w2, sheet_name=(VALIDATION_SHEET_NAME[:31] or "Validation"), index=False))
+                    except Exception:
+                        pass
+
+                    # 3) Routing Summary (write minimal summary if routing_used missing)
+                    try:
+                        include_summary_cfg = bool(CFG.get("export", {}).get("statements_workbook", {}).get("include_routing_summary", True))
+                        include_summary_env = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
+                        if include_summary_cfg or include_summary_env:
+                            rows = []
+                            if routing_used:
+                                for dt in sheet_order:
+                                    if dt in (routing_used or {}):
+                                        cfg = routing_used.get(dt, {})
+                                        try:
+                                            row_count = int((combined_sheets.get(dt) or {}).shape[0]) if dt in combined_sheets and combined_sheets[dt] is not None else 0
+                                        except Exception:
+                                            row_count = 0
+                                        rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra","")), row_count])
+                                cols = ["Doc Type", "Parser App ID", "Model", "Extra Accuracy", "Rows"]
+                            else:
+                                for dt in sheet_order:
+                                    try:
+                                        row_count = int((combined_sheets.get(dt) or {}).shape[0]) if dt in combined_sheets and combined_sheets[dt] is not None else 0
+                                    except Exception:
+                                        row_count = 0
+                                    rows.append([dt, row_count])
+                                cols = ["Doc Type", "Rows"]
+                            if rows:
+                                _pd.DataFrame(rows, columns=cols).to_excel(_w2, sheet_name="Routing Summary", index=False)
+                    except Exception:
+                        pass
+
+                    # 4) Periods sheet (optional)
+                    try:
+                        any_periods = any(bool(v) for v in (period_by_doc or {}).values())
+                    except Exception:
+                        any_periods = False
+                    try:
+                        if any_periods:
+                            period_rows = []
+                            for dt in sheet_order:
+                                pdata = (period_by_doc or {}).get(dt, {}) or {}
+                                for cid, info in pdata.items():
+                                    period_rows.append([
+                                        dt,
+                                        str(cid).upper(),
+                                        (info or {}).get("label", ""),
+                                        (info or {}).get("start_date", ""),
+                                        (info or {}).get("end_date", ""),
+                                        (info or {}).get("role", ""),
+                                        "Yes" if (info or {}).get("is_cumulative") else "No",
+                                        "Yes" if (info or {}).get("is_audited") else "No",
+                                    ])
+                            if period_rows:
+                                _pd.DataFrame(period_rows, columns=["Doc Type", "Column ID", "Label", "Start Date", "End Date", "Role", "Cumulative?", "Audited?"]).to_excel(_w2, sheet_name="Periods", index=False)
+                    except Exception:
+                        pass
                 # Re-open and report
                 wb_verify = load_workbook(out_path)
                 print(f"[Excel] Rewrite complete — sheets now: {wb_verify.sheetnames}", flush=True)
