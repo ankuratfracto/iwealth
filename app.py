@@ -1171,8 +1171,56 @@ if st.session_state["excel_bytes"]:
             key="download_edited",
         )
 
-    # ── Quick stats & visualisations ───────────────────────────
+    # Allow downloading just the current sheet as a separate client .xlsx
     view_df = edited_df if st.session_state.get("edited_excel_bytes") else df
+    try:
+        import re as _re
+        buf_single = io.BytesIO()
+        safe_name = (selected_sheet[:31] or "Sheet")
+        with pd.ExcelWriter(buf_single, engine="openpyxl") as _w:
+            view_df.to_excel(_w, sheet_name=safe_name, index=False)
+            ws = _w.book[safe_name]
+            from openpyxl.styles import Font as _Font, Alignment as _Alignment, PatternFill as _PatternFill
+            header_font  = _Font(bold=True, color="FFFFFF")
+            header_fill  = _PatternFill("solid", fgColor="305496")
+            header_align = _Alignment(vertical="center", horizontal="center", wrap_text=True)
+            for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
+                longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
+                width = min(max(longest + 2, 10), 60)
+                ws.column_dimensions[col[0].column_letter].width = width
+                for c in col[1:]:
+                    c.alignment = _Alignment(vertical="top", wrap_text=True)
+            for c in ws[1]:
+                c.font = header_font
+                c.fill = header_fill
+                c.alignment = header_align
+            ws.freeze_panes = "A2"
+        single_bytes = buf_single.getvalue()
+        base = Path(st.session_state["excel_filename"]).stem
+        base = _re.sub(r"_client$", "", base)
+        # Try to map truncated sheet names back to canonical labels for nicer filenames
+        label_for_slug = selected_sheet
+        try:
+            canon = (CFG.get("labels", {}) or {}).get("canonical", []) or []
+            for cand in canon:
+                if str(cand).lower().startswith(str(selected_sheet).strip().lower()):
+                    label_for_slug = cand
+                    break
+        except Exception:
+            pass
+        sheet_slug = _re.sub(r"[^A-Za-z0-9]+", "_", str(label_for_slug).strip()).strip("_").lower()
+        single_name = f"{base}_{sheet_slug}_client.xlsx"
+        st.download_button(
+            "⬇️ Download current sheet (client)",
+            data=single_bytes,
+            file_name=single_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_client_sheet",
+        )
+    except Exception:
+        pass
+
+    # ── Quick stats & visualisations ───────────────────────────
 
     st.markdown("### 3. Quick stats")
     k1, k2 = st.columns(2)
