@@ -514,4 +514,572 @@ __all__ = [
     "pick_common_size_denominator",
     "quality_flags",
     "extract_footnote_refs",
+    "compute_common_size",
+    "compute_period_math",
 ]
+
+
+# --- Common-size table computation -----------------------------------------
+
+def _rows_from_df_like(rows: List[dict]) -> List[dict]:
+    # Already rows; keep as-is (helper kept for parity with excel_ops)
+    return rows or []
+
+
+def _period_cols_in_rows(rows: List[dict]) -> List[str]:
+    return _num_cols_from_rows(rows)
+
+
+def compute_common_size(doc_type: str, rows: List[dict], labels_by_id: Dict[str, str]) -> Dict[str, Any] | None:
+    denom = pick_common_size_denominator(doc_type, rows)
+    if not denom:
+        return None
+    cols = _period_cols_in_rows(rows)
+    if not cols:
+        return {"denominator": denom, "rows": []}
+    # Locate denominator row index
+    denom_idx = None
+    for i, r in enumerate(rows):
+        if r.get("id") == denom.get("row_id"):
+            denom_idx = i; break
+        name = str(r.get("Particulars") or r.get("particulars") or "")
+        if name == denom.get("label") and denom_idx is None:
+            denom_idx = i
+    if denom_idx is None:
+        # fallback: first row that matches label substring
+        for i, r in enumerate(rows):
+            name = str(r.get("Particulars") or r.get("particulars") or "")
+            if denom.get("label") and denom.get("label") in name:
+                denom_idx = i; break
+    if denom_idx is None:
+        return {"denominator": denom, "rows": []}
+
+    out_rows = []
+    for r in rows:
+        name = str(r.get("Particulars") or r.get("particulars") or "").strip()
+        rid = r.get("id")
+        rec = {"id": rid, "Particulars": name}
+        for c in cols:
+            num = _coerce_num(r.get(c))
+            den = _coerce_num(rows[denom_idx].get(c))
+            if num is None or den in (None, 0):
+                rec[c] = None
+            else:
+                rec[c] = (float(num) / float(den)) * 100.0
+        out_rows.append(rec)
+    return {"denominator": denom, "rows": out_rows, "period_columns": cols}
+
+
+# --- Period math for headline series ---------------------------------------
+
+_PL_HEADLINE_PATTERNS = [
+    r"^\s*revenue\s*from\s*operations\b",
+    r"^\s*total\s*income\b",
+]
+_BS_HEADLINE_PATTERNS = [
+    r"^\s*total\s*assets\b",
+]
+_CF_HEADLINE_PATTERNS = [
+    r"net\s*(increase|decrease).*cash",
+    r"cash\s*and\s*cash\s*equivalents\s*at\s*the\s*end",
+]
+
+
+def _find_row_index_by_patterns(rows: List[dict], pats: List[str]) -> int | None:
+    for i, r in enumerate(rows or []):
+        name = str(r.get("Particulars") or r.get("particulars") or "")
+        for ps in pats:
+            try:
+                if re.search(ps, name, re.I):
+                    return i
+            except Exception:
+                continue
+    return None
+
+
+def _series_for_row(rows: List[dict], idx: int, labels_by_id: Dict[str, str]) -> List[Tuple[str, date, float | None]]:
+    cols = _period_cols_in_rows(rows)
+    # Build mapping col->end_date
+    pidx = build_period_index(labels_by_id or {})
+    by_id = (pidx.get("by_id") or {})
+    items: List[Tuple[str, date, float | None]] = []
+    for c in cols:
+        label_meta = by_id.get(str(c).lower())
+        dt = None
+        if label_meta and label_meta.get("end_date"):
+            try:
+                y, m, d = map(int, str(label_meta["end_date"]).split("-")[:3])
+                dt = date(y, m, d)
+            except Exception:
+                dt = None
+        val = _coerce_num(rows[idx].get(c))
+        if dt is not None:
+            items.append((c, dt, val))
+    items.sort(key=lambda t: t[1])
+    return items
+
+
+def _pct(a: float | None, b: float | None) -> float | None:
+    if a is None or b in (None, 0):
+        return None
+    try:
+        return (a / b - 1.0) * 100.0
+    except Exception:
+        return None
+
+
+def compute_period_math(doc_type: str, rows: List[dict], labels_by_id: Dict[str, str]) -> Dict[str, Any] | None:
+    kind = _canon_doc_kind(doc_type)
+    if kind == "Others":
+        return None
+    if kind == "Profit And Loss Statement":
+        idx = _find_row_index_by_patterns(rows, _PL_HEADLINE_PATTERNS)
+    elif kind == "Balance Sheet":
+        idx = _find_row_index_by_patterns(rows, _BS_HEADLINE_PATTERNS)
+    else:
+        idx = _find_row_index_by_patterns(rows, _CF_HEADLINE_PATTERNS)
+    if idx is None:
+        # fallback to denominator row
+        denom = pick_common_size_denominator(doc_type, rows)
+        if denom:
+            for i, r in enumerate(rows or []):
+                if r.get("id") == denom.get("row_id") or (str(r.get("Particulars") or r.get("particulars") or "") == denom.get("label")):
+                    idx = i; break
+    if idx is None:
+        return None
+
+    series = _series_for_row(rows, idx, labels_by_id)
+    if not series:
+        return None
+
+    # QoQ and YoY for quarterly; YoY for annual
+    qoq: Dict[str, float | None] = {}
+    yoy: Dict[str, float | None] = {}
+
+    # Build maps by date
+    by_date = {dt: (col, val) for (col, dt, val) in series}
+    dates_sorted = [dt for (_, dt, _) in series]
+
+    for i, dt in enumerate(dates_sorted):
+        col, val = by_date[dt]
+        # QoQ (previous point)
+        if i >= 1:
+            prev_dt = dates_sorted[i-1]
+            _, prev_val = by_date[prev_dt]
+            qoq[col] = _pct(val, prev_val)
+        else:
+            qoq[col] = None
+        # YoY (12 months prior)
+        prev_year = date(dt.year - 1, dt.month, dt.day)
+        if prev_year in by_date:
+            _, prev_val = by_date[prev_year]
+            yoy[col] = _pct(val, prev_val)
+        else:
+            yoy[col] = None
+
+    # TTM (sum of last four quarters) — only if we have ≥ 4 observations within ~1 year range
+    ttm: Dict[str, float | None] = {}
+    for i, dt in enumerate(dates_sorted):
+        if i >= 3:
+            vals = [by_date[dates_sorted[i - k]][1] for k in range(0, 4)]
+            if any(v is None for v in vals):
+                ttm[by_date[dt][0]] = None
+            else:
+                ttm[by_date[dt][0]] = float(sum(vals))
+        else:
+            ttm[by_date[dt][0]] = None
+
+    # CAGR across annual series if available
+    # Identify annual points as those with month == fiscal_year_end_month
+    pidx = build_period_index(labels_by_id or {})
+    fy_end = int(pidx.get("fiscal_year_end_month", 3) or 3)
+    annual_points = [(dt, by_date[dt][1]) for dt in dates_sorted if dt.month == fy_end]
+    cagr = None
+    if len(annual_points) >= 2:
+        start, sv = annual_points[0]
+        end, ev = annual_points[-1]
+        n_years = max(1, end.year - start.year)
+        if sv not in (None, 0) and ev not in (None, 0):
+            try:
+                cagr = (float(ev) / float(sv)) ** (1.0 / n_years) - 1.0
+                cagr *= 100.0
+            except Exception:
+                cagr = None
+
+    return {
+        "row": {
+            "index": idx,
+            "label": str(rows[idx].get("Particulars") or rows[idx].get("particulars") or ""),
+            "id": rows[idx].get("id"),
+        },
+        "qoq_pct": qoq,
+        "yoy_pct": yoy,
+        "ttm": ttm,
+        "cagr_pct": cagr,
+    }
+
+
+def compute_common_size_cashflow(cf_rows: List[dict], pl_rows: List[dict], labels_by_id: Dict[str, str]) -> Dict[str, Any] | None:
+    """Compute CF common-size using P&L revenue as denominator when available."""
+    cols = _period_cols_in_rows(cf_rows)
+    if not cols:
+        return None
+    # Find P&L revenue row
+    pats = _DEFAULT_DENOMS.get("Profit And Loss Statement", [])
+    idx = _find_row_index_by_patterns(pl_rows or [], pats)
+    if idx is None:
+        # fallback to CF intrinsic denominator if any
+        return compute_common_size("Cashflow", cf_rows, labels_by_id)
+    out_rows = []
+    for r in cf_rows or []:
+        name = str(r.get("Particulars") or r.get("particulars") or "").strip()
+        rid = r.get("id")
+        rec = {"id": rid, "Particulars": name}
+        for c in cols:
+            num = _coerce_number_like(r.get(c))
+            den = _coerce_number_like(pl_rows[idx].get(c))
+            if num is None or den in (None, 0):
+                rec[c] = None
+            else:
+                rec[c] = (float(num) / float(den)) * 100.0
+        out_rows.append(rec)
+    denom = {"label": str(pl_rows[idx].get("Particulars") or pl_rows[idx].get("particulars") or ""), "row_id": pl_rows[idx].get("id"), "match": "P&L revenue cross-link"}
+    return {"denominator": denom, "rows": out_rows, "period_columns": cols}
+
+
+def compute_period_math_multi(doc_type: str, rows: List[dict], labels_by_id: Dict[str, str]) -> Dict[str, Any] | None:
+    cfg = (((CFG.get("analytics", {}) or {}).get("period_math", {}) or {}).get("kpis", {}) or {})
+    kind = _canon_doc_kind(doc_type)
+    kpi_list = cfg.get(kind) or []
+    if not kpi_list:
+        return None
+    out: Dict[str, Any] = {}
+    for item in kpi_list:
+        name = str(item.get("name") or "").strip() if isinstance(item, dict) else None
+        pats = item.get("patterns") if isinstance(item, dict) else None
+        if not name or not pats:
+            continue
+        idx = _find_row_index_by_patterns(rows, pats)
+        if idx is None:
+            continue
+        series = _series_for_row(rows, idx, labels_by_id)
+        if not series:
+            continue
+        # Build maps by date
+        by_date = {dt: (col, val) for (col, dt, val) in series}
+        dates_sorted = [dt for (_, dt, _) in series]
+        qoq: Dict[str, float | None] = {}
+        yoy: Dict[str, float | None] = {}
+        for i, dt in enumerate(dates_sorted):
+            col, val = by_date[dt]
+            if i >= 1:
+                prev_dt = dates_sorted[i-1]
+                _, prev_val = by_date[prev_dt]
+                qoq[col] = _pct(val, prev_val)
+            else:
+                qoq[col] = None
+            prev_year = date(dt.year - 1, dt.month, dt.day)
+            if prev_year in by_date:
+                _, prev_val = by_date[prev_year]
+                yoy[col] = _pct(val, prev_val)
+            else:
+                yoy[col] = None
+        out[name] = {"qoq_pct": qoq, "yoy_pct": yoy}
+    return out or None
+
+
+# Helpers for core pack
+def _series_by_date(rows: List[dict], labels_by_id: Dict[str, str], patterns: List[str]) -> Dict[date, float]:
+    idx = _find_row_index_by_patterns(rows, patterns)
+    if idx is None:
+        return {}
+    series = _series_for_row(rows, idx, labels_by_id)
+    out: Dict[date, float] = {}
+    for _, dt, val in series:
+        if val is None:
+            continue
+        out[dt] = float(val)
+    return out
+
+
+def _align_dates(*series: Dict[date, float]) -> List[date]:
+    if not series:
+        return []
+    common = None
+    for s in series:
+        dts = set(s.keys())
+        common = dts if common is None else (common & dts)
+    return sorted(list(common or set()))
+
+
+def _days_for_dt(dt: date, fy_end_month: int = 3) -> int:
+    return 365 if dt.month == int(fy_end_month or 3) else 90
+
+
+def compute_core_pack(
+    combined_rows_by_doc: Dict[str, List[dict]] | None,
+    periods_by_doc: Dict[str, Dict[str, Any]] | None,
+    cfg: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    cfg = cfg or {}
+    rows_by_doc = combined_rows_by_doc or {}
+    pmap_by_doc = periods_by_doc or {}
+
+    def _labels_for_doc(doc: str) -> Dict[str, str]:
+        raw = (pmap_by_doc.get(doc) or {})
+        out: Dict[str, str] = {}
+        for k, v in raw.items():
+            if isinstance(v, dict):
+                out[str(k).lower()] = str(v.get("label", ""))
+            else:
+                out[str(k).lower()] = str(v)
+        return out
+
+    # Prefer consolidated docs, else standalone
+    PL = "Consolidated Profit and Loss Statement" if "Consolidated Profit and Loss Statement" in rows_by_doc else "Standalone Profit and Loss Statement"
+    BS = "Consolidated Balance Sheet" if "Consolidated Balance Sheet" in rows_by_doc else "Standalone Balance Sheet"
+    CF = "Consolidated Cashflow" if "Consolidated Cashflow" in rows_by_doc else "Standalone Cashflow"
+
+    pl_rows = rows_by_doc.get(PL) or []
+    bs_rows = rows_by_doc.get(BS) or []
+    cf_rows = rows_by_doc.get(CF) or []
+    pl_labels = _labels_for_doc(PL)
+    bs_labels = _labels_for_doc(BS)
+    cf_labels = _labels_for_doc(CF)
+    fy_end = 3
+    try:
+        fy_end = int(build_period_index(pl_labels).get("fiscal_year_end_month", 3) or 3)
+    except Exception:
+        pass
+
+    def _pat(ns, key, default):
+        try:
+            return (CFG.get("analytics", {}) or {}).get("kpi_patterns", {}).get(ns, {}).get(key, default)
+        except Exception:
+            return default
+
+    # Patterns
+    rev_pat     = _pat("pl", "revenue", _DEFAULT_DENOMS["Profit And Loss Statement"])
+    ebitda_pat  = _pat("pl", "ebitda", [r"\bebitda\b", r"earnings before interest, tax, depreciation and amortisation"])  # spellings
+    ebit_pat    = _pat("pl", "ebit", [r"\bprofit\s*before\s*interest\s*and\s*tax\b", r"\boperating\s*profit\b", r"\bebit\b"])
+    np_pat      = _pat("pl", "net_profit", [r"\bprofit\s*after\s*tax\b", r"\bpat\b", r"\bnet\s*profit\b"])
+    gp_pat      = _pat("pl", "gross_profit", [r"\bgross\s*profit\b"])
+    cogs_pat    = _pat("pl", "cogs", [r"\bcost\s*of\s*(goods|materials)\b", r"\bcosts?\s*of\s*revenue\b"])
+
+    ocf_pat     = _pat("cf", "ocf", [r"\bnet\s*cash\s*from\s*operating\s*activities\b", r"\bcash\s*generated\s*from\s*operations\b"])
+    capex_pat   = _pat("cf", "capex", [r"\bpurchase\s*of\s*property,?\s*plant\s*and\s*equipment\b", r"\bcapital\s*expenditure\b"])  # negative values
+
+    recv_pat    = _pat("bs", "receivables", [r"\btrade\s*receivables\b", r"\baccounts\s*receivable\b"])
+    pay_pat     = _pat("bs", "payables", [r"\btrade\s*payables\b", r"\baccounts\s*payable\b"])
+    inv_pat     = _pat("bs", "inventory", [r"\binventor(y|ies)\b", r"\bstock\b"])
+    assets_pat  = _pat("bs", "total_assets", [r"^\s*total\s*assets\b"])  # already defaulted
+    equity_pat  = _pat("bs", "equity", [r"\btotal\s*equity\b", r"\bshareholders'?\s*funds\b", r"\bnet\s*worth\b"])
+    debt_pat    = _pat("bs", "total_debt", [r"\bborrowings\b", r"\btotal\s*debt\b"])  # may need sum of long+short
+    cash_pat    = _pat("bs", "cash", [r"\bcash\s*and\s*cash\s*equivalents\b", r"\bcash\b"])
+
+    int_exp_pat = _pat("pl", "interest_expense", [r"\bfinance\s*costs\b", r"\binterest\s*expense\b"])
+    tax_exp_pat = _pat("pl", "tax_expense", [r"\btax\s*expense\b", r"\bcurrent\s*tax\b"])  # rough
+    pbt_pat     = _pat("pl", "pbt", [r"\bprofit\s*before\s*tax\b", r"\bpbt\b"])
+
+    # Build series by date
+    rev  = _series_by_date(pl_rows, pl_labels, rev_pat)
+    ebitda = _series_by_date(pl_rows, pl_labels, ebitda_pat)
+    ebit   = _series_by_date(pl_rows, pl_labels, ebit_pat)
+    np     = _series_by_date(pl_rows, pl_labels, np_pat)
+    gp     = _series_by_date(pl_rows, pl_labels, gp_pat)
+    cogs   = _series_by_date(pl_rows, pl_labels, cogs_pat)
+
+    ocf    = _series_by_date(cf_rows, cf_labels, ocf_pat)
+    capex  = _series_by_date(cf_rows, cf_labels, capex_pat)
+
+    recv   = _series_by_date(bs_rows, bs_labels, recv_pat)
+    pay    = _series_by_date(bs_rows, bs_labels, pay_pat)
+    inv    = _series_by_date(bs_rows, bs_labels, inv_pat)
+    assets = _series_by_date(bs_rows, bs_labels, assets_pat)
+    equity = _series_by_date(bs_rows, bs_labels, equity_pat)
+    debt   = _series_by_date(bs_rows, bs_labels, debt_pat)
+    cash   = _series_by_date(bs_rows, bs_labels, cash_pat)
+
+    int_exp = _series_by_date(pl_rows, pl_labels, int_exp_pat)
+    tax_exp = _series_by_date(pl_rows, pl_labels, tax_exp_pat)
+    pbt     = _series_by_date(pl_rows, pl_labels, pbt_pat)
+
+    # Growth & margins
+    dates = sorted(set(rev.keys()))
+    margins = {"gross": {}, "ebitda": {}, "ebit": {}, "np": {}}
+    for dt in dates:
+        r = rev.get(dt)
+        if r in (None, 0):
+            continue
+        if dt in gp:
+            margins["gross"][dt.isoformat()] = (gp[dt] / r) * 100.0
+        elif dt in cogs:
+            margins["gross"][dt.isoformat()] = ((r - cogs[dt]) / r) * 100.0
+        if dt in ebitda:
+            margins["ebitda"][dt.isoformat()] = (ebitda[dt] / r) * 100.0
+        if dt in ebit:
+            margins["ebit"][dt.isoformat()] = (ebit[dt] / r) * 100.0
+        if dt in np:
+            margins["np"][dt.isoformat()] = (np[dt] / r) * 100.0
+
+    # Cash conversion
+    fcf: Dict[str, float] = {}
+    fcf_margin: Dict[str, float] = {}
+    cash_conv: Dict[str, float] = {}
+    capex_intensity: Dict[str, float] = {}
+    for dt in _align_dates(ocf, capex, rev, ebitda):
+        rid = dt.isoformat()
+        ocfv = ocf.get(dt)
+        capv = capex.get(dt)
+        rv = rev.get(dt)
+        ev = ebitda.get(dt)
+        if ocfv is not None and capv is not None:
+            fcf[rid] = float(ocfv) - float(capv)
+        if rv not in (None, 0) and rid in fcf:
+            fcf_margin[rid] = (fcf[rid] / rv) * 100.0
+        if ev not in (None, 0) and ocfv is not None:
+            cash_conv[rid] = (ocfv / ev)
+        if rv not in (None, 0) and capv is not None:
+            capex_intensity[rid] = (capv / rv) * 100.0
+
+    # Working capital & CCC
+    dso: Dict[str, float] = {}
+    dpo: Dict[str, float] = {}
+    dio: Dict[str, float] = {}
+    ccc: Dict[str, float] = {}
+    for dt in _align_dates(recv, pay, inv, rev):
+        days = _days_for_dt(dt, fy_end)
+        rid = dt.isoformat()
+        rv = rev.get(dt)
+        if rv not in (None, 0):
+            if dt in recv:
+                dso[rid] = (recv[dt] / rv) * days
+        base = cogs.get(dt) if dt in cogs and cogs.get(dt) not in (None, 0) else rv
+        if base not in (None, 0):
+            if dt in pay:
+                dpo[rid] = (pay[dt] / base) * days
+            if dt in inv:
+                dio[rid] = (inv[dt] / base) * days
+        if rid in dso and rid in dpo and rid in dio:
+            ccc[rid] = dso[rid] + dio[rid] - dpo[rid]
+
+    # Profitability trees: DuPont ROE
+    roe: Dict[str, float] = {}
+    dupont: Dict[str, Dict[str, float]] = {}
+    for dt in _align_dates(np, rev, assets, equity):
+        rid = dt.isoformat()
+        rv = rev.get(dt)
+        av = assets.get(dt)
+        ev = equity.get(dt)
+        nv = np.get(dt)
+        if None in (rv, av, ev) or rv == 0 or av == 0 or ev == 0:
+            continue
+        npm = nv / rv
+        at = rv / av
+        lev = av / ev
+        roe[rid] = (npm * at * lev) * 100.0
+        dupont[rid] = {"npm_pct": npm * 100.0, "asset_turnover": at, "leverage": lev}
+
+    # ROIC & spread vs WACC (approx)
+    roic: Dict[str, float] = {}
+    spread: Dict[str, float] = {}
+    try:
+        wacc = float(((CFG.get("analytics", {}) or {}).get("wacc", 0.12))) * 100.0
+    except Exception:
+        wacc = 12.0
+    for dt in _align_dates(ebit, tax_exp, pbt, assets):
+        rid = dt.isoformat()
+        ebit_v = ebit.get(dt)
+        pbt_v = pbt.get(dt)
+        tax_v = tax_exp.get(dt)
+        ic = assets.get(dt)
+        if None in (ebit_v, ic) or ic == 0:
+            continue
+        eff_tax = None
+        if pbt_v not in (None, 0) and tax_v is not None:
+            try:
+                eff_tax = max(0.0, min(1.0, float(tax_v) / float(pbt_v)))
+            except Exception:
+                eff_tax = None
+        nopat = ebit_v * (1.0 - (eff_tax if eff_tax is not None else 0.25))
+        roic_val = (nopat / ic) * 100.0
+        roic[rid] = roic_val
+        spread[rid] = roic_val - wacc
+
+    # Earnings quality
+    accruals_ratio: Dict[str, float] = {}
+    fcf_vs_np: Dict[str, float] = {}
+    for dt in _align_dates(np, ocf, assets):
+        rid = dt.isoformat()
+        nv = np.get(dt)
+        ocfv = ocf.get(dt)
+        av = assets.get(dt)
+        if None not in (nv, ocfv, av) and av != 0:
+            accruals_ratio[rid] = ((nv - ocfv) / av) * 100.0
+    for dt in _align_dates(np, ocf, capex):
+        rid = dt.isoformat()
+        nv = np.get(dt)
+        ocfv = ocf.get(dt)
+        capv = capex.get(dt)
+        if None not in (nv, ocfv, capv) and nv != 0:
+            fcf_vs_np[rid] = ((ocfv - capv) / nv)
+
+    # Leverage & solvency
+    net_debt: Dict[str, float] = {}
+    nd_to_ebitda: Dict[str, float] = {}
+    int_cov: Dict[str, float] = {}
+    for dt, dv in debt.items():
+        rid = dt.isoformat()
+        net_debt[rid] = float(dv) - float(cash.get(dt, 0.0))
+    for dt in _align_dates({date.fromordinal(d.toordinal()): v for d, v in list(debt.items())}, ebitda):
+        # align by same dt keys present in both; above trick forces type mapping, but we already have date keys
+        rid = dt.isoformat()
+        nd = net_debt.get(rid)
+        ev = ebitda.get(dt)
+        if nd is not None and ev not in (None, 0):
+            nd_to_ebitda[rid] = nd / ev
+    for dt in _align_dates(ebit, int_exp):
+        rid = dt.isoformat()
+        ev = ebit.get(dt)
+        iv = int_exp.get(dt)
+        if iv not in (None, 0) and ev is not None:
+            int_cov[rid] = ev / iv
+
+    segments = {"by_segment": [], "by_geo": [], "notes": "No structured segment rows detected"}
+
+    return {
+        "growth_margin": {
+            "margins_pct": margins,
+        },
+        "cash_conversion": {
+            "ocf": {k.isoformat(): v for k, v in ocf.items()},
+            "fcf": fcf,
+            "fcf_margin_pct": fcf_margin,
+            "cash_conversion_ratio": cash_conv,
+            "capex_intensity_pct": capex_intensity,
+        },
+        "working_capital_ccc": {
+            "dso_days": dso,
+            "dpo_days": dpo,
+            "dio_days": dio,
+            "ccc_days": ccc,
+        },
+        "profitability": {
+            "roe_pct": roe,
+            "dupont": dupont,
+            "roic_pct": roic,
+            "spread_vs_wacc_pct": spread,
+        },
+        "earnings_quality": {
+            "accruals_ratio_pct_of_assets": accruals_ratio,
+            "fcf_vs_np_ratio": fcf_vs_np,
+            "notes": "One-offs isolation/tax normalization requires detailed mapping; left for future",
+        },
+        "leverage_solvency": {
+            "net_debt": net_debt,
+            "net_debt_to_ebitda": nd_to_ebitda,
+            "interest_coverage": int_cov,
+            "debt_maturity": {},
+        },
+        "segments": segments,
+    }

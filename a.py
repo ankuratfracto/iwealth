@@ -1920,6 +1920,9 @@ if __name__ == "__main__":
         if argv and argv[0] in {"from-json", "--from-json"}:
             from iwe_core.cli import run_from_json_argv
             sys.exit(run_from_json_argv(argv[1:]))
+        if argv and argv[0] in {"analyze", "--analyze"}:
+            from iwe_core.cli import run_analyze_argv
+            sys.exit(run_analyze_argv(argv[1:]))
     except Exception as _e:
         print("[from-json] Failed:", _e)
     # Default CLI → delegate to pipeline

@@ -369,6 +369,7 @@ export:
     include_routing_summary: true
     include_validation_sheet: true       # add Validation sheet with sum checks
     validation_sheet_name: "Validation"
+    include_common_size_sheets: true     # also emit "(Common Size)" sheets
     # Use a boolean or a per-sheet map. Enable labels for Cashflow too.
     use_period_labels:
       default: true
@@ -392,6 +393,32 @@ export:
 
 analytics:
   enable: true
+  units:
+    default_unit: "crore"            # used if assume_when_missing=true
+    assume_when_missing: true        # if true and unit not detected, use default_unit
+  wacc: 0.12                        # default WACC (12%) for ROIC spread calculations
+  kpi_patterns:                     # regex patterns to find KPIs in rows
+    pl:                             # Profit & Loss
+      revenue: ['^\s*revenue\s*from\s*operations\b','^\s*total\s*income\b']
+      ebitda: ['\bebitda\b','earnings before interest, tax, depreciation and amortisation']
+      ebit: ['profit\s*before\s*interest\s*and\s*tax','\boperating\s*profit\b','\bebit\b']
+      net_profit: ['\bprofit\s*after\s*tax\b','\bpat\b','\bnet\s*profit\b']
+      gross_profit: ['\bgross\s*profit\b']
+      cogs: ['cost\s*of\s*(goods|materials)','costs?\s*of\s*revenue']
+      interest_expense: ['\bfinance\s*costs\b','\binterest\s*expense\b']
+      tax_expense: ['\btax\s*expense\b','\bcurrent\s*tax\b']
+      pbt: ['\bprofit\s*before\s*tax\b','\bpbt\b']
+    cf:                             # Cashflow
+      ocf: ['net\s*cash\s*from\s*operating\s*activities','cash\s*generated\s*from\s*operations']
+      capex: ['purchase\s*of\s*property,?\s*plant\s*and\s*equipment','capital\s*expenditure']
+    bs:                             # Balance Sheet
+      receivables: ['\btrade\s*receivables\b','\baccounts\s*receivable\b']
+      payables: ['\btrade\s*payables\b','\baccounts\s*payable\b']
+      inventory: ['\binventor(y|ies)\b','\bstock\b']
+      total_assets: ['^\s*total\s*assets\b']
+      equity: ['\btotal\s*equity\b','shareholders?\s*funds','\bnet\s*worth\b']
+      total_debt: ['\bborrowings\b','\btotal\s*debt\b']
+      cash: ['cash\s*and\s*cash\s*equivalents','\bcash\b']
   # Denominator patterns for common-size statements (case-insensitive regex)
   common_size:
     denominators:
@@ -404,6 +431,7 @@ analytics:
         - '^\s*total\s*equity\s*and\s*liabilit(?:y|ies)\b'
       Cashflow:
         - '^\s*revenue\b'
+    include_rows: true                  # include per-row % values in analytics.common_size
 
 logging:
   # Quick presets: quiet | normal | verbose (acts as defaults; explicit keys win)

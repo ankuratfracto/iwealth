@@ -43,5 +43,8 @@ The combined JSON now includes an optional `analytics` section per document
 - quality: basic data quality flags and simple checks (e.g., BS tie)
 - footnotes: light-weight note reference tokens found in line items
 
-This does not modify Excel values; it provides trustworthy metadata for
-downstream normalization and metrics.
+This does not modify Excel values by default; it provides trustworthy metadata
+for downstream normalization and metrics. You can now also:
+
+- Include common-size tables as extra sheets by setting `export.statements_workbook.include_common_size_sheets: true` (default true)
+- Compute analytics for existing combined JSONs: `python a.py analyze <*_statements.json> [--out-dir DIR]`

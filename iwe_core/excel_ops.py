@@ -26,6 +26,7 @@ from iwe_core.json_ops import (
     extract_period_maps_from_payload as _extract_period_maps_from_payload,
     scan_group_jsons_for_periods as _scan_group_jsons_for_periods,
 )
+from iwe_core import analytics as _analytics
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -444,12 +445,57 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
         pass
 
     t0 = time.perf_counter()
+
+    def _sanitize_text(s: Any) -> Any:
+        try:
+            if s is None:
+                return None
+            if isinstance(s, (int, float)):
+                return s
+            t = str(s)
+            # Remove XML-invalid control characters
+            import re as _re
+            t = _re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", " ", t)
+            return t
+        except Exception:
+            return s
+
+    def _sanitize_df_for_excel(df):
+        try:
+            import pandas as _pd
+            if df is None or getattr(df, 'empty', True):
+                return df
+            obj_cols = [c for c in df.columns if str(getattr(df.dtypes, '__getitem__')(c)).startswith('object')]
+            if obj_cols:
+                df[obj_cols] = df[obj_cols].applymap(_sanitize_text)
+        except Exception:
+            pass
+        return df
+
+    used_sheet_names: set[str] = set()
+
+    def _unique_sheet_name(raw: str) -> str:
+        import re as _re
+        name = str(raw or 'Sheet')
+        # Remove illegal characters
+        name = _re.sub(r"[:\\/*?\[\]]", " ", name).strip()
+        name = name[:31] or 'Sheet'
+        base = name
+        idx = 2
+        while name in used_sheet_names:
+            suffix = f" ({idx})"
+            name = (base[: max(0, 31 - len(suffix))] + suffix)[:31]
+            idx += 1
+        used_sheet_names.add(name)
+        return name
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         try:
             print(f"[Excel] Writer created: engine=openpyxl, book_type={type(writer.book).__name__}", flush=True)
         except Exception:
             pass
         validation_rows: list[list] = []
+
+        wrote_any_real_sheet = False
 
         def _pick_company_type_from_routing(routing: dict | None) -> str:
             try:
@@ -1771,31 +1817,31 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                 return True
             return bool(val)
 
-        for sheet_name in sheet_order:
-            _sheet_t0 = time.perf_counter()
-            df = combined_sheets.get(sheet_name)
-            if df is None or getattr(df, "empty", True):
-                df = pd.DataFrame(columns=["Particulars"])
-                pre_cols = list(df.columns)
-                print(f"[Excel] [{sheet_name}] columns_before={pre_cols}", flush=True)
-                print(f"[Excel] [{sheet_name}] is_empty=True rows=0 cols={len(pre_cols)}", flush=True)
-            else:
-                df = _normalize_df_for_excel(sheet_name, df)
-                pre_cols = list(df.columns)
-                try:
-                    _mem = int(df.memory_usage(index=True, deep=True).sum()) if hasattr(df, "memory_usage") else -1
-                except Exception:
-                    _mem = -1
-                print(f"[Excel] [{sheet_name}] columns_before={pre_cols}", flush=True)
-                try:
-                    print(f"[Excel] [{sheet_name}] shape(before)={getattr(df, 'shape', (0,0))} approx_mem={_mem}B", flush=True)
-                except Exception:
-                    pass
+    for sheet_name in sheet_order:
+        _sheet_t0 = time.perf_counter()
+        df = combined_sheets.get(sheet_name)
+        if df is None or getattr(df, "empty", True):
+            df = pd.DataFrame(columns=["Particulars"])
+            pre_cols = list(df.columns)
+            print(f"[Excel] [{sheet_name}] columns_before={pre_cols}", flush=True)
+            print(f"[Excel] [{sheet_name}] is_empty=True rows=0 cols={len(pre_cols)}", flush=True)
+        else:
+            df = _normalize_df_for_excel(sheet_name, df)
+            pre_cols = list(df.columns)
             try:
-                logger.info("Excel pre-rename [%s] cols=%s", sheet_name, list(df.columns))
+                _mem = int(df.memory_usage(index=True, deep=True).sum()) if hasattr(df, "memory_usage") else -1
+            except Exception:
+                _mem = -1
+            print(f"[Excel] [{sheet_name}] columns_before={pre_cols}", flush=True)
+            try:
+                print(f"[Excel] [{sheet_name}] shape(before)={getattr(df, 'shape', (0,0))} approx_mem={_mem}B", flush=True)
             except Exception:
                 pass
-
+        try:
+            logger.info("Excel pre-rename [%s] cols=%s", sheet_name, list(df.columns))
+        except Exception:
+            pass
+        finally:
             # Optionally rename c1..cN headers to actual period labels (per-sheet toggle)
             if _use_labels_for_sheet(sheet_name):
                 try:
@@ -1879,8 +1925,8 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     logger.error("Header rename failed for %s: %s", sheet_name, e)
                     print(f"[Excel] ERROR while renaming headers for {sheet_name!r}: {e}", flush=True)
 
-            # Drop empty period/numeric columns (e.g., blank c3/c4/c5 or empty labeled periods)
-            try:
+        # Drop empty period/numeric columns (e.g., blank c3/c4/c5 or empty labeled periods)
+        try:
                 import re as _re
                 meta_cols = {"particulars","sr_no","id","row_type","parent_id","components","calculation_references","section","section_id","sectionid","section_id"}
                 drop_cols = []
@@ -1898,53 +1944,61 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                 if drop_cols:
                     print(f"[Excel] [{sheet_name}] dropping empty columns: {drop_cols}", flush=True)
                     df = df.drop(columns=drop_cols)
-            except Exception as _de:
-                print(f"[Excel] WARN: drop-empty-columns failed for {sheet_name!r}: {_de}", flush=True)
+        except Exception as _de:
+            print(f"[Excel] WARN: drop-empty-columns failed for {sheet_name!r}: {_de}", flush=True)
 
-            safe_name = sheet_name[:31] or "Sheet"
-            # Per-sheet dtype summary for debugging
-            try:
-                _dtypes = [str(df.dtypes.__getitem__(c)) for c in df.columns]
-                print(f"[Excel] [{sheet_name}] dtypes(before_write)={dict(zip(df.columns, _dtypes))}", flush=True)
-            except Exception:
-                pass
-            try:
-                print(f"[Excel] [{sheet_name}] writing → sheet={safe_name} rows={getattr(df,'shape',(0,0))[0]} cols={getattr(df,'shape',(0,0))[1]}", flush=True)
-            except Exception:
-                pass
-            try:
-                df.to_excel(writer, sheet_name=safe_name, index=False)
-            except Exception as _we:
-                print(f"[Excel] ERROR writing sheet '{sheet_name}' → {safe_name}: {_we}", flush=True)
-                raise
+        safe_name = sheet_name[:31] or "Sheet"
+        # Per-sheet dtype summary for debugging
+        try:
+            _dtypes = [str(df.dtypes.__getitem__(c)) for c in df.columns]
+            print(f"[Excel] [{sheet_name}] dtypes(before_write)={dict(zip(df.columns, _dtypes))}", flush=True)
+        except Exception:
+            pass
+        try:
+            print(f"[Excel] [{sheet_name}] writing → sheet={safe_name} rows={getattr(df,'shape',(0,0))[0]} cols={getattr(df,'shape',(0,0))[1]}", flush=True)
+        except Exception:
+            pass
+        try:
+            df = _sanitize_df_for_excel(df)
+            safe_name = _unique_sheet_name(sheet_name)
+            df.to_excel(writer, sheet_name=safe_name, index=False)
+            wrote_any_real_sheet = True
+        except Exception as _we:
+            print(f"[Excel] ERROR writing sheet '{sheet_name}' → {safe_name}: {_we}", flush=True)
+            # Continue to next sheet; placeholder ensures workbook remains valid
+            continue
 
-            ws = writer.book[safe_name]
-            header_font  = Font(bold=True, color=header_font_color)
-            header_fill  = PatternFill("solid", fgColor=header_fill_hex)
-            header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-            cell_align   = Alignment(vertical="top", wrap_text=True)
+        ws = writer.book[safe_name]
+        try:
+            ws.sheet_state = "visible"
+        except Exception:
+            pass
+        header_font  = Font(bold=True, color=header_font_color)
+        header_fill  = PatternFill("solid", fgColor=header_fill_hex)
+        header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
+        cell_align   = Alignment(vertical="top", wrap_text=True)
 
-            max_width = 60
-            for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row):
-                # autosize
-                longest = 0
-                for c in col_cells:
-                    val = "" if c.value is None else str(c.value)
-                    longest = max(longest, len(val))
-                ws.column_dimensions[col_cells[0].column_letter].width = min(max(longest + 2, 10), max_width)
+        max_width = 60
+        for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row):
+            # autosize
+            longest = 0
+            for c in col_cells:
+                val = "" if c.value is None else str(c.value)
+                longest = max(longest, len(val))
+            ws.column_dimensions[col_cells[0].column_letter].width = min(max(longest + 2, 10), max_width)
 
-                # header style
-                h = col_cells[0]
-                h.font = header_font
-                h.fill = header_fill
-                h.alignment = header_align
+            # header style
+            h = col_cells[0]
+            h.font = header_font
+            h.fill = header_fill
+            h.alignment = header_align
 
-                # data cells style + number format if numeric present
-                any_num = any(isinstance(c.value, (int, float)) for c in col_cells[1:])
-                for c in col_cells[1:]:
-                    c.alignment = cell_align
-                    if any_num and (str(h.value).strip().lower() not in {"particulars","description","particular"}):
-                        c.number_format = "#,##0.00_);(#,##0.00)"
+            # data cells style + number format if numeric present
+            any_num = any(isinstance(c.value, (int, float)) for c in col_cells[1:])
+            for c in col_cells[1:]:
+                c.alignment = cell_align
+                if any_num and (str(h.value).strip().lower() not in {"particulars","description","particular"}):
+                    c.number_format = "#,##0.00_);(#,##0.00)"
 
             try:
                 ws_debug_headers = [cell.value for cell in ws[1]]
@@ -1957,6 +2011,70 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                 ws.freeze_panes = freeze_panes
             except Exception:
                 ws.freeze_panes = "A2"
+
+            # Optional Common-Size sheet right after the base sheet
+            try:
+                if bool((CFG.get("export", {}) or {}).get("statements_workbook", {}).get("include_common_size_sheets", True)):
+                    # Rebuild rows from df to feed analytics common-size
+                    try:
+                        rows_for_cs = []
+                        for _, row in df.iterrows():
+                            r = {k: row[k] for k in df.columns if k in (list(df.columns))}
+                            rows_for_cs.append(r)
+                    except Exception:
+                        rows_for_cs = []
+                    # Build labels map from period_labels_by_doc or global cache
+                    labels_map = _pick_period_labels_for_sheet(
+                        sheet_name,
+                        period_labels_by_doc,
+                        PERIOD_LABELS_BY_DOC,
+                    ) or {}
+                    # Normalize to key->label strings
+                    if labels_map and any(isinstance(v, dict) for v in labels_map.values()):
+                        labels_map = {str(k).lower(): str((v or {}).get("label", "")) for k, v in (labels_map or {}).items()}
+                    else:
+                        labels_map = {str(k).lower(): str(v) for k, v in (labels_map or {}).items()}
+                    cs = _analytics.compute_common_size(sheet_name, rows_for_cs, labels_map)
+                    if cs and (cs.get("rows") or []):
+                        import pandas as _pd
+                        df_cs = _pd.DataFrame(cs.get("rows") or [])
+                        # keep columns order: Particulars, then period columns in detected order
+                        cols = [c for c in df_cs.columns if str(c).lower() == "particulars"]
+                        try:
+                            _pcols = [c for c in df_cs.columns if re.fullmatch(r"(?i)[cp]\\d+", str(c))]
+                            # sort c1..cN by index
+                            _pcols = sorted(_pcols, key=lambda x: int(re.findall(r"\d+", str(x))[0]))
+                        except Exception:
+                            _pcols = [c for c in df_cs.columns if c not in cols]
+                        ordered = cols + _pcols + [c for c in df_cs.columns if c not in cols + _pcols]
+                        df_cs = df_cs.loc[:, ordered]
+                        df_cs = _sanitize_df_for_excel(df_cs)
+                        safe_cs = _unique_sheet_name(sheet_name + " (Common Size)")
+                        df_cs.to_excel(writer, sheet_name=safe_cs, index=False)
+                        ws_cs = writer.book[safe_cs]
+                        # Style similar to base, with percentage format for numeric columns
+                        header_font  = Font(bold=True, color=header_font_color)
+                        header_fill  = PatternFill("solid", fgColor=header_fill_hex)
+                        header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
+                        cell_align   = Alignment(vertical="top", wrap_text=True)
+                        for col_cells in ws_cs.iter_cols(min_row=1, max_row=ws_cs.max_row):
+                            longest = max(len("" if c.value is None else str(c.value)) for c in col_cells)
+                            ws_cs.column_dimensions[col_cells[0].column_letter].width = min(max(longest + 2, 10), 60)
+                            h = col_cells[0]
+                            h.font = header_font
+                            h.fill = header_fill
+                            h.alignment = header_align
+                            any_num = any(isinstance(c.value, (int, float)) for c in col_cells[1:])
+                            for c in col_cells[1:]:
+                                c.alignment = cell_align
+                                if any_num and (str(h.value).strip().lower() not in {"particulars","description","particular"}):
+                                    c.number_format = "0.00%"
+                        try:
+                            ws_cs.freeze_panes = freeze_panes
+                        except Exception:
+                            ws_cs.freeze_panes = "A2"
+            except Exception as _ec:
+                print(f"[Excel] WARN: common-size sheet for {sheet_name!r} failed: {_ec}", flush=True)
 
             # Collect validation rows for Balance Sheet / P&L / Cashflow sheets
             try:
@@ -2005,6 +2123,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra","")), cfg.get("company_type",""), row_count])
             if rows:
                 pd.DataFrame(rows, columns=summary_cols).to_excel(writer, sheet_name="Routing Summary", index=False)
+                wrote_any_real_sheet = True
                 ws_sum = writer.book["Routing Summary"]
                 header_font  = Font(bold=True, color=header_font_color)
                 header_fill  = PatternFill("solid", fgColor=header_fill_hex)
@@ -2020,9 +2139,9 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     cell.alignment = header_align
                 ws_sum.freeze_panes = "A2"
 
-        # Optional "Validation" sheet with sum checks
+        # Optional "Validation" sheet with sum checks (disabled in base workbook; see validations-only workbook below)
         try:
-            if INCLUDE_VALIDATION_SHEET and validation_rows:
+            if False and INCLUDE_VALIDATION_SHEET and validation_rows:
                 import pandas as pd
                 from datetime import datetime
                 from openpyxl.utils import get_column_letter
@@ -2030,6 +2149,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     "Doc Type", "Particulars", "Section", "Column", "Sum of Items", "Reported Total", "Difference", "Status", "Tolerance", "Details"
                 ]
                 pd.DataFrame(validation_rows, columns=val_cols).to_excel(writer, sheet_name=VALIDATION_SHEET_NAME[:31] or "Validation", index=False)
+                wrote_any_real_sheet = True
                 ws_v = writer.book[VALIDATION_SHEET_NAME[:31] or "Validation"]
                 header_font  = Font(bold=True, color=header_font_color)
                 header_fill  = PatternFill("solid", fgColor=header_fill_hex)
@@ -2108,6 +2228,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     period_rows,
                     columns=["Doc Type", "Column ID", "Label", "Start Date", "End Date", "Role", "Cumulative?", "Audited?"]
                 ).to_excel(writer, sheet_name="Periods", index=False)
+                wrote_any_real_sheet = True
                 ws_p = writer.book["Periods"]
                 header_font  = Font(bold=True, color=header_font_color)
                 header_fill  = PatternFill("solid", fgColor=header_fill_hex)
@@ -2122,6 +2243,8 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     cell.fill = header_fill
                     cell.alignment = header_align
                 ws_p.freeze_panes = "A2"
+
+        # no placeholder sheet used
 
     # At the end, optionally write periods debug JSON
     try:

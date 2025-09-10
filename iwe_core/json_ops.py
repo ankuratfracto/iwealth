@@ -441,11 +441,20 @@ def write_statements_json(
                 qflags = _analytics.quality_flags(doc_type, rows, labels)
                 footrefs = _analytics.extract_footnote_refs(rows)
 
+                # Period math & common-size
+                period_math = _analytics.compute_period_math(doc_type, rows, labels)
+                common_size = _analytics.compute_common_size(doc_type, rows, labels)
+                if common_size and not bool((CFG.get("analytics", {}) or {}).get("common_size", {}).get("include_rows", True)):
+                    # strip heavy rows if disabled
+                    common_size = {k: v for k, v in common_size.items() if k != "rows"}
+
                 analytics_meta[doc_type] = {
                     "units": units,
                     "period_index": period_idx,
                     "quality": qflags,
                     "footnotes": footrefs,
+                    "period_math": period_math,
+                    "common_size": common_size,
                     "restatements": {},
                 }
             except Exception:
@@ -459,6 +468,13 @@ def write_statements_json(
     }
     if analytics_meta:
         out["analytics"] = analytics_meta
+        try:
+            # Build a core pack across statements (prefers consolidated; falls back to standalone)
+            core = _analytics.compute_core_pack(combined_rows, periods_by_doctype, cfg=(CFG.get("analytics", {}) or {}))
+            if core:
+                out["analytics"]["core"] = core
+        except Exception:
+            pass
 
     combined_json_cfg = (CFG.get("export", {}).get("combined_json", {}) or {})
     if combined_json_cfg.get("include_first_pass") and first_pass_results is not None:

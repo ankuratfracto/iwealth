@@ -169,4 +169,89 @@ def run_from_json_argv(argv: List[str]) -> int:
 __all__ = [
     "from_json_to_workbook",
     "run_from_json_argv",
+    "run_analyze_argv",
 ]
+
+def _compute_analytics_for_combined_json(obj: Dict[str, Any]) -> Dict[str, Any]:
+    data = dict(obj)
+    docs = (data.get("documents") or {})
+    analytics_out: Dict[str, Any] = {}
+    for doc_type, entry in docs.items():
+        rows = entry.get("rows") or []
+        labels_raw = entry.get("periods") or {}
+        # Normalize labels to string map
+        labels = {}
+        for k, v in (labels_raw or {}).items():
+            if isinstance(v, dict):
+                labels[str(k).lower()] = str(v.get("label", ""))
+            else:
+                labels[str(k).lower()] = str(v)
+        try:
+            units = json_ops._analytics.detect_units_and_currency({}, rows)  # type: ignore[attr-defined]
+        except Exception:
+            units = {}
+        period_idx = json_ops._analytics.build_period_index(labels)  # type: ignore[attr-defined]
+        qflags = json_ops._analytics.quality_flags(doc_type, rows, labels)  # type: ignore[attr-defined]
+        footrefs = json_ops._analytics.extract_footnote_refs(rows)  # type: ignore[attr-defined]
+        period_math = json_ops._analytics.compute_period_math(doc_type, rows, labels)  # type: ignore[attr-defined]
+        common_size = json_ops._analytics.compute_common_size(doc_type, rows, labels)  # type: ignore[attr-defined]
+        if common_size and not bool(((CFG.get("analytics", {}) or {}).get("common_size", {}) or {}).get("include_rows", True)):
+            common_size = {k: v for k, v in common_size.items() if k != "rows"}
+        analytics_out[doc_type] = {
+            "units": units,
+            "period_index": period_idx,
+            "quality": qflags,
+            "footnotes": footrefs,
+            "period_math": period_math,
+            "common_size": common_size,
+            "restatements": {},
+        }
+    data["analytics"] = analytics_out
+    try:
+        # Build a core pack across statements using the rows already in combined JSON
+        combined_rows = {dt: (docs.get(dt, {}).get("rows") or []) for dt in docs.keys()}
+        periods_by_doc = {dt: (docs.get(dt, {}).get("periods") or {}) for dt in docs.keys()}
+        core = _analytics.compute_core_pack(combined_rows, periods_by_doc, cfg=(CFG.get("analytics", {}) or {}))
+        if core:
+            data["analytics"]["core"] = core
+    except Exception:
+        pass
+    return data
+
+def run_analyze_argv(argv: List[str]) -> int:
+    """Compute analytics for existing *_statements.json files and update in place.
+
+    Usage: a.py analyze <file1_statements.json> [file2_statements.json ...] [--out-dir DIR]
+    """
+    out_dir = None
+    jsons: List[str] = []
+    it = iter(argv)
+    for tok in it:
+        if tok == "--out-dir":
+            try:
+                out_dir = next(it)
+            except StopIteration:
+                out_dir = None
+            continue
+        jsons.append(tok)
+    if not jsons:
+        print("analyze: provide one or more *_statements.json files")
+        return 1
+    for jp in jsons:
+        p = Path(jp).expanduser().resolve()
+        try:
+            obj = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[analyze] skip unreadable {p}: {e}")
+            continue
+        try:
+            updated = _compute_analytics_for_combined_json(obj)
+            out_path = p
+            if out_dir:
+                out_path = Path(out_dir).expanduser().resolve() / p.name
+            Path(out_path).write_text(_json.dumps(updated, indent=2), encoding="utf-8")
+            print(f"[analyze] analytics updated → {out_path}")
+        except Exception as e:
+            print(f"[analyze] failed for {p}: {e}")
+            return 2
+    return 0
