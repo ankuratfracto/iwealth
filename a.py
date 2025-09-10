@@ -1,42 +1,15 @@
 # a.py
 
 from __future__ import annotations
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+# from concurrent.futures import ThreadPoolExecutor, as_completed  # imported locally where needed
 import re
 from pathlib import Path
 import yaml, os
-
-def _deep_update(dst, src):
-    for k, v in (src or {}).items():
-        if isinstance(v, dict) and isinstance(dst.get(k), dict):
-            _deep_update(dst[k], v)
-        else:
-            dst[k] = v
-    return dst
-
-def load_config():
-    cfg_path = Path(__file__).parent / "config.yaml"
-    cfg = yaml.safe_load(cfg_path.read_text())
-    # optional local overrides
-    local = cfg.get("paths", {}).get("config_local", "config.local.yaml")
-    lp = (cfg_path.parent / local)
-    if lp.exists():
-        _deep_update(cfg, yaml.safe_load(lp.read_text()))
-    # env overrides (examples)
-    if os.getenv("FRACTO_API_KEY"):
-        cfg["api"]["api_key_env"] = "FRACTO_API_KEY"
-    if os.getenv("FRACTO_EXPAND_NEIGHBORS"):
-        cfg["passes"]["first"]["selection"]["neighbor_radius"] = int(os.getenv("FRACTO_EXPAND_NEIGHBORS"))
-    return cfg
+import iwe_core.excel_ops as excel_ops
+from iwe_core.config import CFG
 
 # Global cache used by Excel header renaming and diagnostics
 PERIOD_LABELS_BY_DOC: dict[str, dict] = {}
-CFG = load_config()
-# Safe fallback in case _renumber_serials isn't defined elsewhere
-if "_renumber_serials" not in globals():
-    def _renumber_serials(results):
-        return results
 
 # Process one page per chunk; use config defaults
 CHUNK_SIZE_PAGES = int(CFG.get("concurrency", {}).get("chunk_size_pages", 1))
@@ -47,117 +20,41 @@ def _split_pdf_bytes(pdf_bytes: bytes,
                      chunk_size: int = CHUNK_SIZE_PAGES,
                      min_tail: int = MIN_TAIL_COMBINE) -> list[bytes]:
     """
-    Return a list of PDF byte-chunks. Keeps 5-page blocks, *except* that a final
-    fragment < min_tail pages is merged into the previous chunk so it retains
-    invoice context (e.g. 26 pages → 5,5,5,5,6 instead of 5,5,5,5,5,1).
+    Return a list of PDF byte-chunks. Keeps fixed-size blocks, except that a final
+    fragment < min_tail pages is merged into the previous chunk to retain context.
     """
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than 0")
     if min_tail < 0:
         raise ValueError("min_tail must be non-negative")
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    total  = len(reader.pages)
+
+    from iwe_core.pdf_ops import build_pdf_from_pages, get_page_count_from_bytes
+
+    total = get_page_count_from_bytes(pdf_bytes)
     if total <= chunk_size:
         return [pdf_bytes]
 
-    chunks: list[bytes] = []
-    start = 0
-    while start < total:
-        end = min(start + chunk_size, total)
-        # If this is the *last* chunk and it is tiny → back-merge with previous.
-        if total - start < min_tail and chunks:
-            # Append the remaining pages to the previous writer
-            prev_buf = io.BytesIO(chunks.pop())          # last chunk bytes
-            prev_reader = PdfReader(prev_buf)
-            writer = PdfWriter()
-            # re-copy pages of previous chunk
-            for p in prev_reader.pages:
-                writer.add_page(p)
-            # add the tail pages
-            for p in range(start, total):
-                writer.add_page(reader.pages[p])
-            buf = io.BytesIO()
-            writer.write(buf)
-            chunks.append(buf.getvalue())
-            break   # finished
-        else:
-            writer = PdfWriter()
-            for p in range(start, end):
-                writer.add_page(reader.pages[p])
-            buf = io.BytesIO()
-            writer.write(buf)
-            chunks.append(buf.getvalue())
-            start = end
+    # Compute (start,end) 1-based inclusive ranges with tail-merge
+    ranges: list[tuple[int, int]] = []
+    start = 1
+    while start <= total:
+        end = min(start + chunk_size - 1, total)
+        tail = total - end
+        if tail < min_tail and ranges:
+            ps, pe = ranges[-1]
+            ranges[-1] = (ps, total)
+            break
+        ranges.append((start, end))
+        start = end + 1
 
+    chunks: list[bytes] = []
+    for s, e in ranges:
+        chunks.append(build_pdf_from_pages(pdf_bytes, range(s, e + 1)))
     return chunks
 
 def call_fracto_parallel(pdf_bytes, file_name, *, extra_accuracy: str = "true") -> list[dict]:
-    """
-    If the PDF is ≤ chunk_size_pages, behaves like `call_fracto` (returns [single‑result]).
-    If more, splits into chunk_size_pages page chunks and hits the Fracto API concurrently with
-    up to `MAX_PARALLEL` workers. Results are returned in order of the chunks.
-    """
-    chunks = _split_pdf_bytes(pdf_bytes, CHUNK_SIZE_PAGES)
-    if len(chunks) == 1:
-        return [call_fracto(pdf_bytes, file_name, extra_accuracy=extra_accuracy)]
-
-    logger.info("Splitting %s into %d chunks of %d pages each", file_name, len(chunks), CHUNK_SIZE_PAGES)
-
-    results: list[Optional[dict]] = [None] * len(chunks)
-
-    with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-        # Build a human‑readable per‑page filename: <orig‑stem>_page_<N>.pdf
-        base_stem = Path(file_name).stem
-        futures = {
-            pool.submit(
-                call_fracto,
-                chunk,
-                f"{base_stem}_page_{i + 1}.pdf",
-                extra_accuracy=extra_accuracy,
-            ): i
-            for i, chunk in enumerate(chunks)
-        }
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                results[idx] = fut.result()
-            except Exception as exc:
-                logger.error("Chunk %d failed: %s", idx + 1, exc)
-                results[idx] = {"file": file_name, "status": "error", "error": str(exc)}
-
-    if any(r is None for r in results):
-        raise RuntimeError("Missing OCR results for some PDF chunks")
-    final_results = [r for r in results if r is not None]
-    _renumber_serials(final_results)
-
-    # ── Debug: First-pass summary (has_table / classified / multi-section) ──
-    try:
-        def _is_true(x):
-            return str(x).strip().lower() in ("true","1","yes","y","on")
-        table_pages, classified_pages, multi_pages = [], [], []
-        for idx, res in enumerate(final_results, start=1):
-            pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
-            if isinstance(pdict, list):
-                # If parsedData is a list of dicts, scan for 'has_table'
-                ht = any(_is_true((item or {}).get("has_table")) for item in pdict if isinstance(item, dict))
-                if ht:
-                    table_pages.append(idx)
-            else:
-                if _is_true(pdict.get("has_table")):
-                    table_pages.append(idx)
-                dt = str(pdict.get("Document_type", "")).strip()
-                if dt and dt.lower() != "others":
-                    classified_pages.append(idx)
-                if _is_true(pdict.get("Has_multiple_sections")):
-                    multi_pages.append(idx)
-        logger.info(
-            "First-pass summary → has_table: %s | classified(!=Others): %s | multi-section: %s",
-            table_pages, classified_pages, multi_pages
-        )
-    except Exception:
-        pass
-
-    return final_results
+    from iwe_core.ocr_client import call_fracto_parallel as _core_parallel
+    return _core_parallel(pdf_bytes, file_name, extra_accuracy=extra_accuracy)
 #!/usr/bin/env python
 """
 fracto_page_ocr.py
@@ -166,20 +63,17 @@ Split a PDF page-by-page and pipe each page through Fracto Smart-OCR.
 """
 
 import io
-import os
-import sys
+# import os  # already imported above
+# use top-level sys import
 import json
 import time
 import logging
-from pathlib import Path
-from typing import List, Dict, Any
+# from pathlib import Path  # already imported above
+# typing imported later where needed
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-import yaml
+from openpyxl.styles import Font, Alignment, PatternFill
 
-import requests
-from PyPDF2 import PdfReader, PdfWriter
+from PyPDF2 import PdfReader
 from reportlab.pdfgen import canvas
 
 # ─── PDF Stamping Helper ──────────────────────────────────────────────
@@ -196,10 +90,7 @@ def reorder_dataframe_sections_first(df):
 
     Totals/Subtotals are always pushed to the end of their section.
     """
-    try:
-        import pandas as _pd  # noqa: F401
-    except Exception:
-        return df
+    # Proceed without importing pandas; operate on duck-typed DataFrame
     if df is None or getattr(df, "empty", True):
         return df
 
@@ -357,12 +248,9 @@ def reorder_dataframe_sections_first(df):
 
 # Try to patch sanitize_statement_df to reorder before every return
 import inspect
-import types
-import sys
 
 def _patch_sanitize_statement_df():
-    import re as _re
-    import builtins
+    # no local-only imports needed here
     global_vars = globals()
     # Find the function
     fn = global_vars.get("sanitize_statement_df")
@@ -404,7 +292,6 @@ if _os.getenv("IWEALTH_ENABLE_RUNTIME_PATCHES") == "1":
 # --- Patch: Excel-writing functions (sanitize_statement_df → reorder_dataframe_sections_first)
 def _patch_excel_writers():
     import inspect
-    import sys
     global_vars = globals()
     # Find all functions that look like Excel writers
     for name, fn in list(global_vars.items()):
@@ -505,6 +392,23 @@ def stamp_job_number(src_bytes: bytes, job_no: str, margin: int = 20) -> bytes:
 FRACTO_ENDPOINT = CFG.get("api", {}).get("endpoint", "https://prod-ml.fracto.tech/upload-file-smart-ocr")
 API_KEY_ENV     = CFG.get("api", {}).get("api_key_env", "FRACTO_API_KEY")
 API_KEY         = os.getenv(API_KEY_ENV, "")
+QR_RANGE_ENABLE = bool((CFG.get("api", {}).get("qr_range", {}) or {}).get("enable", False))
+QR_RANGE_VALUE  = str((CFG.get("api", {}).get("qr_range", {}) or {}).get("value", "")).strip()
+VALIDATION_SUM_ENABLE = bool(((CFG.get("validation", {}) or {}).get("checks", {}) or {}).get("balance_sheet", {}).get("sum_subitems", {}).get("enable", True))
+VALIDATION_SUM_TOL_PCT = float(((CFG.get("validation", {}) or {}).get("checks", {}) or {}).get("balance_sheet", {}).get("sum_subitems", {}).get("tolerance_pct", 0.001))
+VALIDATION_SUM_ABS_MIN = float(((CFG.get("validation", {}) or {}).get("checks", {}) or {}).get("balance_sheet", {}).get("sum_subitems", {}).get("abs_min", 1.0))
+
+# Fine-grained validation toggles (with sensible defaults)
+_VAL_CFG_BS = (((CFG.get("validation", {}) or {}).get("checks", {}) or {}).get("balance_sheet", {}) or {})
+VAL_DECLARED_COMPONENTS = bool(_VAL_CFG_BS.get("declared_components", True))
+VAL_CHILDREN_WITHOUT_COMPONENTS = bool(_VAL_CFG_BS.get("children_without_components", True))
+VAL_SECTION_CHECKS = bool(_VAL_CFG_BS.get("section_checks", True))
+VAL_SECTION_EQUALITY = bool(_VAL_CFG_BS.get("section_equality", True))
+VAL_BLOCK_FALLBACK = bool(_VAL_CFG_BS.get("contiguous_block_fallback", True))
+VAL_COMPOSED_AND_GRAND = bool(_VAL_CFG_BS.get("composed_and_grand", True))
+INCLUDE_VALIDATION_SHEET = bool(((CFG.get("export", {}) or {}).get("statements_workbook", {}) or {}).get("include_validation_sheet", True))
+VALIDATION_SHEET_NAME = str(((CFG.get("export", {}) or {}).get("statements_workbook", {}) or {}).get("validation_sheet_name", "Validation"))
+VALIDATION_PROFILES = (CFG.get("validation", {}) or {}).get("profiles", {}) or {}
 
 # Pass defaults
 PARSER_APP_ID        = CFG.get("passes", {}).get("first",  {}).get("parser_app", "")
@@ -556,6 +460,9 @@ EXPORT_INCLUDE_ROUTING_SUMMARY = bool(CFG.get("export", {}).get("statements_work
 _ROUTING_CFG = CFG.get("routing", {}) or {}
 _ROUTING_COMPANY_DEFAULT = str(CFG.get("company_type_prior", {}).get("default", "corporate")).lower()
 _ROUTING_FALLBACK_ORDER = _ROUTING_CFG.get("fallback_order", ["company_type_and_doc_type","corporate_and_doc_type","third_defaults"])
+_ROUTING_ALLOWED_PARSERS = set((_ROUTING_CFG.get("allowed_parsers") or []) or [])
+_ROUTING_BLOCKED_PARSERS = set((_ROUTING_CFG.get("blocked_parsers") or []) or [])
+_ROUTING_SKIP_ON_DISABLED = bool(_ROUTING_CFG.get("skip_on_disabled", False))
 
 # ─── Generic JSON access & criteria helpers (config‑driven) ─────────────
 TRUTHY_SET = {str(x).strip().lower() for x in (CFG.get("truthy_values") or ["true","1","yes","y","on"])}
@@ -773,15 +680,29 @@ def _resolve_routing(doc_type: str, company_type: str | None = None) -> tuple[st
         if isinstance(ct_map, dict):
             hit = ct_map.get(dt_key)
             if isinstance(hit, dict):
+                # Per-entry toggle (default enabled)
+                if str(hit.get("enable", True)).strip().lower() in {"false","0","no","off"}:
+                    # Respect skip-on-disabled semantics if enabled
+                    if _ROUTING_SKIP_ON_DISABLED:
+                        return (None, None, None)
+                    return None
                 parser = hit.get("parser") or THIRD_PARSER_APP_ID
                 model  = hit.get("model")  or THIRD_MODEL_ID
                 extra  = str(hit.get("extra", EXTRA_ACCURACY_THIRD)).lower()
+                # Global allow/block lists
+                if _ROUTING_ALLOWED_PARSERS and parser not in _ROUTING_ALLOWED_PARSERS:
+                    return None
+                if parser in _ROUTING_BLOCKED_PARSERS:
+                    return None
                 return (parser, model, extra)
         return None
 
     for mode in _ROUTING_FALLBACK_ORDER:
         if mode == "company_type_and_doc_type":
             r = _lookup(ct, dt)
+            if r == (None, None, None):
+                # Explicit skip requested
+                return r
             if r: return r
         elif mode == "corporate_and_doc_type":
             r = _lookup("corporate", dt)
@@ -1108,6 +1029,39 @@ def build_groups(
 
 from typing import Any, List, Dict
 
+def _debug_flag_from_cfg(env_name: str, cfg_key: str, default: bool = False) -> bool:
+    """Env overrides config. Config flag under CFG['debug'][cfg_key]."""
+    try:
+        env = os.getenv(env_name)
+        if env is not None:
+            s = str(env).strip().lower()
+            return s in {"1","true","yes","y","on"}
+        dbg = (CFG.get("debug", {}) or {}).get(cfg_key)
+        # Use existing truthy parser
+        return _is_truthy_val(dbg) if dbg is not None else bool(default)
+    except Exception:
+        return bool(default)
+
+def _debug_enabled() -> bool:
+    return _debug_flag_from_cfg("IWEALTH_DEBUG_JSON", "json_extraction", False)
+
+def _dprint(*args, **kwargs):
+    if _debug_enabled():
+        try:
+            print("[JSONDBG]", *args, **kwargs, flush=True)
+        except Exception:
+            pass
+
+def _valdbg_enabled() -> bool:
+    return _debug_flag_from_cfg("IWEALTH_DEBUG_VALIDATION", "validation", False)
+
+def _vprint(*args, **kwargs):
+    if _valdbg_enabled():
+        try:
+            print("[VALDBG]", *args, **kwargs, flush=True)
+        except Exception:
+            pass
+
 def _extract_rows(parsed: Any, doc_type: str | None = None) -> List[Dict[str, Any]]:
     """
     Flatten Fracto parsedData into a simple list of row dicts.
@@ -1119,6 +1073,7 @@ def _extract_rows(parsed: Any, doc_type: str | None = None) -> List[Dict[str, An
     Skips meta/report scaffolding keys.
     """
     rows: List[Dict[str, Any]] = []
+    current_section: str = ""
 
     def _add_row(d: Dict[str, Any]) -> None:
         if not isinstance(d, dict):
@@ -1130,6 +1085,19 @@ def _extract_rows(parsed: Any, doc_type: str | None = None) -> List[Dict[str, An
             return
 
         row: Dict[str, Any] = {}
+        # Preserve structural hints if present
+        for meta_key in ("id", "row_type", "parent_id", "components"):
+            if meta_key in d:
+                row[meta_key] = d.get(meta_key)
+        # Prefer explicit section_id if provided; else use derived current_section
+        try:
+            _sec = d.get("section_id") or d.get("sectionId")
+        except Exception:
+            _sec = None
+        if _sec:
+            row["section"] = _sec
+        elif current_section:
+            row["section"] = current_section
         # Keep sr_no if present
         for cand in ("sr_no", "Sr_no", "srNo", "SrNo"):
             if cand in d:
@@ -1156,8 +1124,18 @@ def _extract_rows(parsed: Any, doc_type: str | None = None) -> List[Dict[str, An
             row[str(ck).lower()] = d.get(ck)
 
         rows.append(row)
+        # Debug spotlight for common problem lines
+        try:
+            p = str(row.get("Particulars", "")).strip().lower()
+            if _debug_enabled() and any(key in p for key in ["other assets","total current assets","equity attributable"]):
+                _dprint("extract_rows: row", {k: row.get(k) for k in ("Particulars","c1","c2","c3","c4")})
+        except Exception:
+            pass
 
-    def _walk(x: Any) -> None:
+    def _walk(x: Any, ancestors: list[str] | None = None) -> None:
+        nonlocal current_section
+        if ancestors is None:
+            ancestors = []
         if isinstance(x, dict):
             # Header-first: add this node as a potential row *before* visiting children.
             _add_row(x)
@@ -1165,14 +1143,23 @@ def _extract_rows(parsed: Any, doc_type: str | None = None) -> List[Dict[str, An
                 if k in {"meta", "statement_type", "framework", "scope", "report"}:
                     continue
                 if isinstance(v, (dict, list)):
-                    _walk(v)
+                    prev = current_section
+                    # if descending into a list field under ASSETS or EQUITY_AND_LIABILITIES, set section hint
+                    if isinstance(v, list):
+                        top = ancestors[-1] if ancestors else None
+                        if top in {"ASSETS", "EQUITY_AND_LIABILITIES"}:
+                            current_section = f"{top}:{k}"
+                        elif not top and k in {"ASSETS", "EQUITY_AND_LIABILITIES"}:
+                            current_section = k
+                    _walk(v, ancestors + [k])
+                    current_section = prev
         elif isinstance(x, list):
             for it in x:
-                _walk(it)
+                _walk(it, ancestors)
         else:
             return
 
-    _walk(parsed)
+    _walk(parsed, [])
     return rows
 
 def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
@@ -1181,7 +1168,7 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
       • Merge '(Not annualised)' style notes into the 'particulars' text instead of a separate column.
       • Clear duplicate numbers copied onto the row just above a 'Total ...' line.
     """
-    import pandas as pd  # lazy import
+    # no pandas import needed here
     if df is None or df.empty:
         return df
 
@@ -1207,20 +1194,25 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
     # 2) Clear duplicate values on the row just above a 'Total ...' line
     if part_col:
         is_total = out[part_col].astype(str).str.contains(r"\btotal\b", case=False, na=False)
-        num_cols = [c for c in out.columns if c != part_col and pd.to_numeric(out[c], errors="coerce").notna().any()]
+        # treat as numeric columns if at least one value parses via our coercer
+        def _any_parses(col):
+            try:
+                return any(_coerce_number_like(v) is not None for v in out[col])
+            except Exception:
+                return False
+        num_cols = [c for c in out.columns if c != part_col and _any_parses(c)]
         for idx in out.index[is_total]:
             pos = out.index.get_loc(idx)
             if pos == 0:
                 continue
             prev_idx = out.index[pos - 1]
-            # If every numeric cell equals the total row below, blank the previous row's numbers
+            # If every numeric cell parses and equals the total row below, blank the previous row's numbers
             duplicate_all = True
             for c in num_cols:
-                a = pd.to_numeric(out.at[prev_idx, c], errors="coerce")
-                b = pd.to_numeric(out.at[idx, c], errors="coerce")
-                if pd.isna(a) and pd.isna(b):
-                    continue
-                if (pd.isna(a) and not pd.isna(b)) or (not pd.isna(a) and pd.isna(b)) or (a != b):
+                a = _coerce_number_like(out.at[prev_idx, c])
+                b = _coerce_number_like(out.at[idx, c])
+                # require both to be numbers and equal
+                if a is None or b is None or a != b:
                     duplicate_all = False
                     break
             if duplicate_all:
@@ -1462,406 +1454,57 @@ def _coerce_number_like(x):
     """
     if x is None:
         return None
+    # Treat Pandas/NumPy NaNs as None
+    try:
+        import math as _math
+        # plain float NaN
+        if isinstance(x, float) and _math.isnan(x):
+            return None
+    except Exception:
+        pass
+    try:
+        import numpy as _np
+        if isinstance(x, _np.floating) and _np.isnan(x):
+            return None
+    except Exception:
+        pass
+    try:
+        import pandas as _pd  # type: ignore
+        if x is getattr(_pd, 'NA', object()):
+            return None
+    except Exception:
+        pass
     if isinstance(x, (int, float)):
-        return x
+        return float(x)
     s = str(x).strip()
-    if s == "" or s in {"—", "–", "-", "N/A", "na", "NA", "None", "null"}:
+    if s == "" or s in {"—", "–", "-", "N/A", "na", "NA", "None", "none", "null", "NULL"}:
         return None
+    if s.lower() in {"nan", "+nan", "-nan", "inf", "+inf", "-inf"}:
+        return None
+    # Normalise unicode spaces and odd glyphs
+    try:
+        import re as _re
+        s = s.replace("\u00A0", " ")  # NBSP → space
+        s = _re.sub(r"[\u2000-\u200B]", "", s)  # thin/zero-width spaces
+    except Exception:
+        pass
     neg = s.startswith("(") and s.endswith(")")
     if neg:
         s = s[1:-1].strip()
     s = s.replace(",", "").replace("₹", "").replace("$", "").replace("€", "").replace("£", "")
+    # Drop any trailing footnote marks or non-numeric suffix/prefix like '*', '†'
+    try:
+        import re as _re
+        s = _re.sub(r"[^0-9.\-]", "", s)
+    except Exception:
+        pass
     try:
         v = float(s)
         return -v if neg else v
     except Exception:
         return None
 
-def _normalize_df_for_excel(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
-    """
-    Prepare a DataFrame for Excel:
-      • sanitize_statement_df (merge notes, tidy totals)
-      • coerce number-like columns to numeric
-      • ensure a 'Particulars' column exists and is first
-    """
-    import pandas as pd
-    if df is None or df.empty:
-        return df
-    df = sanitize_statement_df(doc_type, df)
 
-    # Reorder columns: sr_no, Particulars, then c1..cN, then the rest
-    try:
-        import re
-        cols = list(df.columns)
-        sr = next((c for c in cols if str(c).strip().lower() == "sr_no"), None)
-        part_aliases = {"particulars","particular","description","line item","line_item","account head","head"}
-        part_col = next((c for c in cols if str(c).strip().lower() in part_aliases), None)
-        if part_col and part_col != "Particulars":
-            df = df.rename(columns={part_col: "Particulars"})
-            part_col = "Particulars"
-        if not part_col and "Particulars" in df.columns:
-            part_col = "Particulars"
-        # collect c-columns
-        c_cols = sorted(
-            [c for c in df.columns if re.fullmatch(r"[cC]\\d+", str(c))],
-            key=lambda x: int(re.findall(r"\\d+", str(x))[0])
-        )
-        ordered = []
-        if sr:
-            ordered.append(sr)
-        if part_col and part_col not in ordered:
-            ordered.append(part_col)
-        ordered.extend([c for c in c_cols if c not in ordered])
-        ordered.extend([c for c in df.columns if c not in ordered])
-        df = df.loc[:, ordered]
-    except Exception:
-        pass
-
-    # Coerce numbers in non-Particulars columns
-    for c in df.columns:
-        if c == part_col:
-            continue
-        coerced = df[c].apply(_coerce_number_like)
-        try:
-            import numpy as np
-            if sum(v is not None for v in coerced) >= max(1, int(0.5 * len(df))):
-                df[c] = coerced
-        except Exception:
-            df[c] = coerced
-    return df
-
-def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[str, "pd.DataFrame"], routing_used: dict[str, dict] | None = None, periods_by_doc: dict[str, dict] | None = None) -> str:
-    """
-    Write a single Excel workbook with:
-      • Fixed sheet order from config (or canonical labels)
-      • Styled headers (colors from config)
-      • Autosized columns with wrapping
-      • Optional 'Routing Summary' sheet
-    Returns the file path.
-    """
-    import pandas as pd
-    from openpyxl.styles import Font, Alignment, PatternFill
-
-    global PERIOD_LABELS_BY_DOC
-
-    use_period_labels_cfg = CFG.get("export", {}).get("statements_workbook", {}).get("use_period_labels", True)
-    xlsx_name_tmpl = CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
-    out_path = Path(pdf_path).with_name(xlsx_name_tmpl.format(stem=stem))
-    print(f"[Excel] ENTER _write_statements_workbook → out={out_path}", flush=True)
-
-    sheet_order = CFG.get("export", {}).get("statements_workbook", {}).get("sheet_order") \
-        or CFG.get("labels", {}).get("canonical", []) \
-        or sorted(combined_sheets.keys())
-
-    style_cfg = CFG.get("export", {}).get("statements_workbook", {}).get("style", {}) or {}
-    header_fill_hex     = str(style_cfg.get("header_fill", "305496")).strip()
-    header_font_color   = str(style_cfg.get("header_font_color", "FFFFFF")).strip()
-    freeze_panes        = str(CFG.get("export", {}).get("statements_workbook", {}).get("freeze_panes", "A2"))
-
-    # Discover/receive period labels
-    print(f"[Excel] use_period_labels_cfg={use_period_labels_cfg}", flush=True)
-
-    period_by_doc = periods_by_doc or {}
-    period_labels_by_doc = _labels_only(period_by_doc)
-
-    # If nothing was passed in-memory, poll the disk a few times before giving up.
-    if not period_labels_by_doc:
-        for attempt in range(1, 8):
-            _by_doc, _labels = _scan_group_jsons_for_periods(pdf_path, stem)
-            if _labels:
-                period_by_doc = _by_doc or {}
-                period_labels_by_doc = _labels or {}
-                print(f"[Excel] Period labels discovered via disk scan on attempt {attempt}", flush=True)
-                break
-            else:
-                print(f"[Excel] No period labels on disk yet (attempt {attempt}) — will retry shortly...", flush=True)
-                time.sleep(1)
-
-    # Final fallback: inspect combined statements JSON from this/prior run
-    if not period_labels_by_doc:
-        try:
-            json_name_tmpl = (CFG.get("export", {}) or {}).get("combined_json", {}).get("filename", "{stem}_statements.json")
-            combined_json_path = Path(pdf_path).with_name(json_name_tmpl.format(stem=stem))
-            if combined_json_path.exists():
-                with open(combined_json_path, "r", encoding="utf-8") as fh:
-                    combined_obj = json.load(fh) or {}
-                docs = combined_obj.get("documents") or {}
-                for dt, entry in docs.items():
-                    labels = {}
-                    for cid, meta in (entry.get("periods") or {}).items():
-                        labels[str(cid).lower()] = (meta or {}).get("label", "")
-                    if labels:
-                        period_labels_by_doc.setdefault(dt, {}).update(labels)
-                print("[Excel] Fallback from combined JSON → period label docs:",
-                    list(period_labels_by_doc.keys()), flush=True)
-        except Exception as e:
-            print("[Excel] Combined JSON fallback failed:", e, flush=True)
-
-    try:
-        print("[Excel] Periods (local keys):", list((period_labels_by_doc or {}).keys()), flush=True)
-    except Exception:
-        pass
-    try:
-        print("[Excel] Periods (global cache keys):", list((PERIOD_LABELS_BY_DOC or {}).keys()), flush=True)
-    except Exception:
-        pass
-
-    if period_labels_by_doc:
-        for _k, _v in period_labels_by_doc.items():
-            PERIOD_LABELS_BY_DOC.setdefault(_k, {}).update(_v)
-
-    debug_dump = {
-        "use_period_labels": use_period_labels_cfg,
-        "periods_by_doc_labels": _labels_only(period_by_doc),
-        "sheets": {}
-    }
-    print(f"[Excel] sheet-order: {sheet_order}")
-
-    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-        def _use_labels_for_sheet(name: str) -> bool:
-            # Accept: bool | {sheet_name: bool, ...}
-            val = use_period_labels_cfg
-            if isinstance(val, dict):
-                # Exact match first
-                if name in val:
-                    return bool(val[name])
-                # Try case-insensitive match
-                for k, v in val.items():
-                    try:
-                        if str(k).strip().lower() == str(name).strip().lower():
-                            return bool(v)
-                    except Exception:
-                        continue
-                # Support optional 'default' key
-                if "default" in val:
-                    try:
-                        return bool(val.get("default"))
-                    except Exception:
-                        return True
-                # Fallback default when dict provided but no key: True
-                return True
-            return bool(val)
-
-        for sheet_name in sheet_order:
-            df = combined_sheets.get(sheet_name)
-            if df is None or getattr(df, "empty", True):
-                df = pd.DataFrame(columns=["Particulars"])
-                pre_cols = list(df.columns)
-                print(f"[Excel] [{sheet_name}] columns_before={pre_cols}", flush=True)
-            else:
-                df = _normalize_df_for_excel(sheet_name, df)
-                pre_cols = list(df.columns)
-                print(f"[Excel] [{sheet_name}] columns_before={pre_cols}", flush=True)
-            try:
-                logger.info("Excel pre-rename [%s] cols=%s", sheet_name, list(df.columns))
-            except Exception:
-                pass
-
-            # Optionally rename c1..cN headers to actual period labels (per-sheet toggle)
-            if _use_labels_for_sheet(sheet_name):
-                try:
-                    # 0) Resolve labels for this sheet from (local → global) caches
-                    period_labels = _pick_period_labels_for_sheet(
-                        sheet_name,
-                        period_labels_by_doc,     # local: from *_ocr.json scan or arg
-                        PERIOD_LABELS_BY_DOC      # global cache from earlier runs
-                    )
-                    print(
-                        f"[Excel] resolve-period-labels: sheet={sheet_name!r} "
-                        f"local_keys={list((period_labels_by_doc.get(sheet_name, {}) or {}).keys()) if isinstance(period_labels_by_doc, dict) else []} "
-                        f"global_keys={list((PERIOD_LABELS_BY_DOC.get(sheet_name, {}) or {}).keys()) if isinstance(PERIOD_LABELS_BY_DOC, dict) else []}",
-                        flush=True
-                    )
-
-                    # Flatten dict-of-dicts ({'c1': {'label': '...'}}) → {'c1': '...'}
-                    if period_labels and any(isinstance(v, dict) for v in period_labels.values()):
-                        period_labels = {
-                            str(k).lower(): (v.get("label") or "") if isinstance(v, dict) else str(v)
-                            for k, v in period_labels.items()
-                        }
-                    else:
-                        period_labels = {
-                            str(k).lower(): ("" if v is None else str(v))
-                            for k, v in (period_labels or {}).items()
-                        }
-
-                    print(f"[Excel] sheet={sheet_name!r} period_label_keys={sorted(list(period_labels.keys())) if period_labels else []}")
-                    if not period_labels:
-                        logger.warning("No period labels found for sheet: %s", sheet_name)
-                        print(f"[Excel] WARN: no period labels found for {sheet_name!r} — columns will remain as c1,c2,...", flush=True)
-                        # still record sheet in debug dump
-                        debug_dump["sheets"][sheet_name] = {
-                            "columns_before": pre_cols,
-                            "period_label_keys": [],
-                            "rename_map": {},
-                            "columns_after": list(df.columns),
-                        }
-                    else:
-                        rename_map: dict[str, str] = {}
-                        for col in list(df.columns):
-                            low = str(col).strip().lower()
-                            # Accept both cN and pN ids; try cross-mapping if keys differ
-                            m = re.fullmatch(r"([cp])(\d+)", low)
-                            if not m:
-                                continue
-                            prefix, num = m.group(1), m.group(2)
-                            key = f"{prefix}{num}"
-                            alt = f"{'p' if prefix == 'c' else 'c'}{num}"
-                            label = None
-                            if key in period_labels and period_labels[key]:
-                                label = str(period_labels[key])
-                            elif alt in period_labels and period_labels[alt]:
-                                label = str(period_labels[alt])
-                            if label:
-                                rename_map[col] = label
-
-                        logger.info("Excel rename [%s] using labels=%s → map=%s", sheet_name, sorted(period_labels.keys()), rename_map)
-                        print(f"[Excel] rename-map for {sheet_name!r}: {rename_map}", flush=True)
-
-                        if rename_map:
-                            df = df.rename(columns=rename_map)
-                            print(f"[Excel] [{sheet_name}] columns_after={list(df.columns)}", flush=True)
-
-                        # record in debug dump (whether or not a rename happened)
-                        debug_dump["sheets"][sheet_name] = {
-                            "columns_before": pre_cols,
-                            "period_label_keys": sorted(list(period_labels.keys())),
-                            "rename_map": rename_map.copy(),
-                            "columns_after": list(df.columns),
-                        }
-                except Exception as e:
-                    logger.error("Header rename failed for %s: %s", sheet_name, e)
-                    print(f"[Excel] ERROR while renaming headers for {sheet_name!r}: {e}", flush=True)
-
-            safe_name = sheet_name[:31] or "Sheet"
-            df.to_excel(writer, sheet_name=safe_name, index=False)
-
-            ws = writer.book[safe_name]
-            header_font  = Font(bold=True, color=header_font_color)
-            header_fill  = PatternFill("solid", fgColor=header_fill_hex)
-            header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-            cell_align   = Alignment(vertical="top", wrap_text=True)
-
-            max_width = 60
-            for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row):
-                # autosize
-                longest = 0
-                for c in col_cells:
-                    val = "" if c.value is None else str(c.value)
-                    longest = max(longest, len(val))
-                ws.column_dimensions[col_cells[0].column_letter].width = min(max(longest + 2, 10), max_width)
-
-                # header style
-                h = col_cells[0]
-                h.font = header_font
-                h.fill = header_fill
-                h.alignment = header_align
-
-                # data cells style + number format if numeric present
-                any_num = any(isinstance(c.value, (int, float)) for c in col_cells[1:])
-                for c in col_cells[1:]:
-                    c.alignment = cell_align
-                    if any_num and (str(h.value).strip().lower() not in {"particulars","description","particular"}):
-                        c.number_format = "#,##0.00_);(#,##0.00)"
-
-            try:
-                ws_debug_headers = [cell.value for cell in ws[1]]
-                logger.info("Excel post-rename [%s] header row=%s", safe_name, ws_debug_headers)
-            except Exception:
-                pass
-
-            try:
-                ws.freeze_panes = freeze_panes
-            except Exception:
-                ws.freeze_panes = "A2"
-
-        # Routing summary (optional)
-        include_summary_cfg = bool(CFG.get("export", {}).get("statements_workbook", {}).get("include_routing_summary", True))
-        include_summary_env = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
-        if (include_summary_cfg or include_summary_env) and routing_used:
-            summary_cols = ["Doc Type", "Parser App ID", "Model", "Extra Accuracy", "Company Type", "Rows"]
-            rows = []
-            for dt in sheet_order:
-                if dt in (routing_used or {}):
-                    cfg = routing_used.get(dt, {})
-                    try:
-                        row_count = int((combined_sheets.get(dt) or {}).shape[0]) if dt in combined_sheets and combined_sheets[dt] is not None else 0
-                    except Exception:
-                        row_count = 0
-                    rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra","")), cfg.get("company_type",""), row_count])
-            if rows:
-                pd.DataFrame(rows, columns=summary_cols).to_excel(writer, sheet_name="Routing Summary", index=False)
-                ws_sum = writer.book["Routing Summary"]
-                header_font  = Font(bold=True, color=header_font_color)
-                header_fill  = PatternFill("solid", fgColor=header_fill_hex)
-                header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-                for col_cells in ws_sum.iter_cols(min_row=1, max_row=ws_sum.max_row):
-                    longest = max(len("" if c.value is None else str(c.value)) for c in col_cells)
-                    ws_sum.column_dimensions[col_cells[0].column_letter].width = min(max(longest + 2, 10), 60)
-                    for c in col_cells[1:]:
-                        c.alignment = Alignment(vertical="top", wrap_text=True)
-                for cell in ws_sum[1]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.alignment = header_align
-                ws_sum.freeze_panes = "A2"
-
-        # Optional "Periods" sheet aggregating period metadata for all documents
-        try:
-            any_periods = any(bool(v) for v in (period_by_doc or {}).values())
-        except Exception:
-            any_periods = False
-        if any_periods:
-            period_rows = []
-            for dt in sheet_order:
-                pdata = (period_by_doc or {}).get(dt, {}) or {}
-                for cid, info in pdata.items():
-                    period_rows.append([
-                        dt,
-                        str(cid).upper(),
-                        (info or {}).get("label", ""),
-                        (info or {}).get("start_date", ""),
-                        (info or {}).get("end_date", ""),
-                        (info or {}).get("role", ""),
-                        "Yes" if (info or {}).get("is_cumulative") else "No",
-                        "Yes" if (info or {}).get("is_audited") else "No",
-                    ])
-            if period_rows:
-                pd.DataFrame(
-                    period_rows,
-                    columns=["Doc Type", "Column ID", "Label", "Start Date", "End Date", "Role", "Cumulative?", "Audited?"]
-                ).to_excel(writer, sheet_name="Periods", index=False)
-                ws_p = writer.book["Periods"]
-                header_font  = Font(bold=True, color=header_font_color)
-                header_fill  = PatternFill("solid", fgColor=header_fill_hex)
-                header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-                for col_cells in ws_p.iter_cols(min_row=1, max_row=ws_p.max_row):
-                    longest = max(len("" if c.value is None else str(c.value)) for c in col_cells)
-                    ws_p.column_dimensions[col_cells[0].column_letter].width = min(max(longest + 2, 10), 60)
-                    for c in col_cells[1:]:
-                        c.alignment = Alignment(vertical="top", wrap_text=True)
-                for cell in ws_p[1]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.alignment = header_align
-                ws_p.freeze_panes = "A2"
-
-    # At the end, write debug JSON with sheet order and cN-column flags
-    try:
-        debug_dump["sheet_order"] = list(sheet_order)
-        # quick flag showing if a sheet carried at least one cN column before rename
-        for s, meta in debug_dump["sheets"].items():
-            cols_before = [str(c).strip().lower() for c in (meta.get("columns_before") or [])]
-            meta["had_c_columns_before"] = any(re.fullmatch(r"c\d+", c) for c in cols_before)
-        dbg_path = out_path.with_name(f"{out_path.stem}_periods_debug.json")
-        with open(dbg_path, "w", encoding="utf-8") as fh:
-            json.dump(debug_dump, fh, ensure_ascii=False, indent=2)
-        print(f"[Excel] Periods debug written → {dbg_path}")
-    except Exception as e:
-        print(f"[Excel] Failed to write periods debug: {e}")
-    
-    print(f"[Excel] DONE writing workbook: {out_path}", flush=True)
-    return str(out_path)
 
 def _write_statements_json(
     pdf_path: str,
@@ -1941,9 +1584,48 @@ def _write_statements_json(
 
 
     allowed = [lbl for lbl in (CFG.get("labels", {}).get("canonical", []) or []) if lbl != "Others"]
+
+    def _coerce_row_numbers(row: dict) -> dict:
+        """Coerce any cN/pN values in a shallow row dict to numbers when possible.
+        Preserves empty strings as empty, and non-parsable values as-is.
+        """
+        out = dict(row)
+        try:
+            import re as _re
+            for k in list(out.keys()):
+                if _re.fullmatch(r"(?i)[cp]\d+", str(k)):
+                    v = out[k]
+                    nv = _coerce_number_like(v)
+                    # Keep original if completely empty; otherwise use numeric or None
+                    if v in ("", None):
+                        continue
+                    out[k] = nv if nv is not None else out[k]
+        except Exception:
+            pass
+        return out
     docs: dict[str, dict] = {}
     for doc_type in allowed:
         rows = combined_rows.get(doc_type) or []
+        if _debug_enabled():
+            try:
+                _dprint(f"pre-coerce rows for {doc_type}: {len(rows)}")
+                _oa0 = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="other assets"]
+                if _oa0:
+                    _dprint("pre-coerce 'Other assets':", _oa0[:1])
+            except Exception:
+                pass
+        # Coerce numeric-like strings to numbers so JSON is consistent and Excel sums are robust downstream
+        try:
+            rows = [_coerce_row_numbers(r) for r in rows]
+        except Exception:
+            pass
+        if _debug_enabled():
+            try:
+                _oa1 = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="other assets"]
+                if _oa1:
+                    _dprint("post-coerce 'Other assets':", _oa1[:1])
+            except Exception:
+                pass
         if not rows:
             continue
         meta = (routing_used or {}).get(doc_type, {}) if routing_used else {}
@@ -1957,6 +1639,13 @@ def _write_statements_json(
         }
         include_rows = bool((CFG.get("export", {}).get("combined_json", {}) or {}).get("include_rows", True))
         if include_rows:
+            if _debug_enabled():
+                try:
+                    oa = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="other assets"]
+                    tca = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="total current assets"]
+                    _dprint(f"statements.json rows for {doc_type}: {len(rows)} | other_assets={oa[:1]} | total_current_assets={tca[:1]}")
+                except Exception:
+                    pass
             entry["rows"] = rows
         docs[doc_type] = entry
 
@@ -2007,7 +1696,7 @@ logging.basicConfig(
 import sys
 print(f"[BOOT] Running script: {__file__}", flush=True)
 try:
-    print(f"[BOOT] Excel writer defined at line {_write_statements_workbook.__code__.co_firstlineno}", flush=True)
+    print(f"[BOOT] Excel writer defined at line {excel_ops._write_statements_workbook.__code__.co_firstlineno}", flush=True)
 except Exception as e:
     print(f"[BOOT] Excel writer introspection failed: {e}", flush=True)
 
@@ -2088,98 +1777,20 @@ def call_fracto(
     *legacy_args,
     parser_app: str = PARSER_APP_ID,
     model: str = MODEL_ID,
-    extra_accuracy: str = "true"
+    extra_accuracy: str = "true",
+    qr_range: str | None = None,
 ) -> Dict[str, Any]:
-    """
-    Send *file_bytes* to Fracto OCR and return the JSON response.
-
-    Parameters
-    ----------
-    parser_app : str, optional
-        ParserApp ID to use (default = PARSER_APP_ID).
-    model : str, optional
-        Model ID to use (default = MODEL_ID).
-    """
-    # Backwards compatibility for legacy positional calls:
-    # - call_fracto(bytes, name, "true")                      -> extra_accuracy
-    # - call_fracto(bytes, name, parser_app, model, extra)    -> parser_app/model/extra_accuracy
-    if legacy_args:
-        if len(legacy_args) == 1 and isinstance(legacy_args[0], str) and legacy_args[0].strip() != "":
-            # Single legacy third positional → interpret as extra_accuracy
-            extra_accuracy = str(legacy_args[0]).strip().lower()
-        else:
-            # Interpret positional sequence as parser_app, model, [extra_accuracy]
-            if len(legacy_args) >= 1 and isinstance(legacy_args[0], str) and legacy_args[0].strip():
-                parser_app = legacy_args[0]
-            if len(legacy_args) >= 2 and isinstance(legacy_args[1], str) and legacy_args[1].strip():
-                model = legacy_args[1]
-            if len(legacy_args) >= 3 and isinstance(legacy_args[2], str) and legacy_args[2].strip():
-                extra_accuracy = legacy_args[2]
-    files = {
-        "file": (file_name, io.BytesIO(file_bytes), "application/pdf"),
-    }
-    data = {
-        "parserApp": parser_app,
-        "model": model,
-        "extra_accuracy": extra_accuracy,
-    }
-    api_key = _resolve_api_key()
-    if not api_key:
-        logger.error("Missing API key. Set %s or add api.api_key in config.yaml.", API_KEY_ENV)
-        return {"file": file_name, "status": "error", "error": f"Missing API key: set env {API_KEY_ENV} or config.api.api_key"}
-    headers = {"x-api-key": api_key}
-
-    try:
-        logger.info("→ OCR %s (parser=%s, model=%s, extra_accuracy=%s)", file_name, parser_app, model, extra_accuracy)
-        start = time.time()
-        resp = requests.post(
-            FRACTO_ENDPOINT,
-            headers=headers,
-            files=files,
-            data=data,
-            timeout=API_TIMEOUT_SEC,
-        )
-        resp.raise_for_status()
-        elapsed = time.time() - start
-        logger.info("✓ %s processed in %.2fs", file_name, elapsed)
-        payload = resp.json()
-
-        # ── Debug: Second-pass classification summary for selected.pdf ──
-        try:
-            if "selected" in file_name.lower():
-                pd_payload = (payload.get("parsedData", {}) or {})
-                cls = []
-                if isinstance(pd_payload, dict):
-                    cls = pd_payload.get("page_wise_classification") or pd_payload.get("classification") or []
-                if cls:
-                    by_type: dict[str, list[int]] = {}
-                    for it in cls:
-                        if not isinstance(it, dict):
-                            continue
-                        is_cont = str(it.get("is_continuation", "")).lower() == "true"
-                        base = (it.get("continuation_of") if is_cont else None) or it.get("doc_type") or "Others"
-                        dt = normalize_doc_type(base)
-                        by_type.setdefault(dt, []).append(int(it.get("page_number", 0) or 0))
-                    logger.info("Second-pass classification → %s", {k: sorted(v) for k, v in by_type.items()})
-        except Exception:
-            pass
-
-        return {"file": file_name, "status": "ok", "data": payload}
-    except requests.HTTPError as exc:
-        code = getattr(exc.response, "status_code", None)
-        body = ""
-        try:
-            body = (exc.response.text or "")[:300]
-        except Exception:
-            pass
-        if code == 403:
-            logger.error("✗ %s failed: HTTP 403 Forbidden. Verify API key and access to parserApp=%s. Endpoint=%s. Body: %s", file_name, parser_app, FRACTO_ENDPOINT, body)
-        else:
-            logger.error("✗ %s failed: HTTP %s. Body: %s", file_name, code, body)
-        return {"file": file_name, "status": "error", "http_status": code, "error": body or str(exc)}
-    except Exception as exc:
-        logger.error("✗ %s failed: %s", file_name, exc)
-        return {"file": file_name, "status": "error", "error": str(exc)}
+    """Thin wrapper delegating to iwe_core.ocr_client.call_fracto."""
+    from iwe_core.ocr_client import call_fracto as _core_call
+    return _core_call(
+        file_bytes,
+        file_name,
+        *legacy_args,
+        parser_app=parser_app,
+        model=model,
+        extra_accuracy=extra_accuracy,
+        qr_range=qr_range,
+    )
 
 
 
@@ -2320,8 +1931,9 @@ def _cli():
     # Build periods map from in-memory third pass (preferred), fallback to disk scan
     periods_by_doc: dict[str, dict] = {}
     try:
-        if 'third_pass_raw' in locals() and third_pass_raw:
-            periods_by_doc = _build_periods_map_from_third(third_pass_raw)
+        _tpr = locals().get('third_pass_raw')
+        if _tpr:
+            periods_by_doc = _build_periods_map_from_third(_tpr)
             print("[Main] built periods_by_doc from memory")
     except Exception as e:
         print("[Main] build periods_by_doc from memory failed:", e)
@@ -2342,9 +1954,9 @@ def _cli():
     if have_combined:
         try:
             print("[Main] workbook finished, starting combined JSON writer …")
-            periods_hint = _build_periods_map_from_third(third_pass_raw)  # third_pass_raw = dict of 3rd‑pass responses by doc type
+            periods_hint = _build_periods_map_from_third(locals().get('third_pass_raw'))  # may be None
             print("[Excel] periods_hint from third-pass raw:", {k: list(v.keys()) for k,v in (periods_hint or {}).items()}, flush=True)
-            # xlsx_path = _write_statements_workbook(
+            # xlsx_path = excel_ops._write_statements_workbook(
             #     pdf_path,
             #     stem,
             #     combined_sheets,
@@ -2352,23 +1964,31 @@ def _cli():
             #     periods_by_doc=periods_hint
             # )
             try:
-                json_path = _write_statements_json(
-                    pdf_path, stem, combined_rows, groups, routing_used, company_type,
+                json_path = excel_ops._write_statements_json(
+                    pdf_path, stem,
+                    locals().get('combined_rows'),
+                    locals().get('groups'),
+                    locals().get('routing_used'),
+                    locals().get('company_type'),
                     out_path_override=client_json_out,
                     first_pass_results=results,
-                    second_pass_result=second_res,
-                    third_pass_raw=third_pass_raw,
+                    second_pass_result=locals().get('second_res'),
+                    third_pass_raw=locals().get('third_pass_raw'),
                     periods_by_doc=periods_by_doc,
                 )
             except TypeError:
                 # periods_by_doc may not be supported; fallback to old signature
                 print("[Main] workbook finished, starting combined JSON writer (legacy signature) …")
-                json_path = _write_statements_json(
-                    pdf_path, stem, combined_rows, groups, routing_used, company_type,
+                json_path = excel_ops._write_statements_json(
+                    pdf_path, stem,
+                    locals().get('combined_rows'),
+                    locals().get('groups'),
+                    locals().get('routing_used'),
+                    locals().get('company_type'),
                     out_path_override=client_json_out,
                     first_pass_results=results,
-                    second_pass_result=second_res,
-                    third_pass_raw=third_pass_raw,
+                    second_pass_result=locals().get('second_res'),
+                    third_pass_raw=locals().get('third_pass_raw'),
                 )
         except Exception as e:
             print("[Main] finalize exports failed:", e)
@@ -2420,14 +2040,10 @@ def _cli():
             min_pages_to_run = int(os.getenv("FRACTO_FILTER_MIN_PAGES", str(flt.get("min_pages_to_run", 0))))
             if flt_enable and len(selected_pages) >= min_pages_to_run:
                 # Build a temporary selected.pdf for the quick filter
+                from iwe_core.pdf_ops import build_pdf_from_pages
                 with open(pdf_path, "rb") as _fh0:
                     _orig0 = _fh0.read()
-                _r0 = PdfReader(io.BytesIO(_orig0))
-                _w0 = PdfWriter()
-                for pno in selected_pages:
-                    _w0.add_page(_r0.pages[pno - 1])
-                _b0 = io.BytesIO(); _w0.write(_b0); _b0.seek(0)
-                _sel0 = _b0.getvalue()
+                _sel0 = build_pdf_from_pages(_orig0, selected_pages)
 
                 nano_parser = str(flt.get("parser_app") or SECOND_PARSER_APP_ID)
                 nano_model  = str(flt.get("model") or SECOND_MODEL_ID)
@@ -2487,7 +2103,7 @@ def _cli():
         # 4️⃣ Assemble those pages into a single in‑memory PDF (and keep original bytes for grouping)
         with open(pdf_path, "rb") as fh:
             orig_bytes = fh.read()
-        reader = PdfReader(io.BytesIO(orig_bytes))
+        from iwe_core.pdf_ops import build_pdf_from_pages
 
         stem = Path(pdf_path).stem
         sel_pdf_name = SELECTED_PDF_NAME_TMPL.format(stem=stem)
@@ -2495,11 +2111,7 @@ def _cli():
         _t1 = time.time()
         if SECOND_COMBINE_PAGES:
             # Combine selected pages into one selected.pdf
-            writer = PdfWriter()
-            for pno in selected_pages:
-                writer.add_page(reader.pages[pno - 1])
-            buf = io.BytesIO(); writer.write(buf); buf.seek(0)
-            selected_bytes = buf.getvalue()
+            selected_bytes = build_pdf_from_pages(orig_bytes, selected_pages)
 
             second_res = call_fracto(
                 selected_bytes,
@@ -2517,8 +2129,9 @@ def _cli():
             with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(selected_pages))) as pool:
                 futs = {}
                 for i, pno in enumerate(selected_pages, start=1):
-                    w = PdfWriter(); w.add_page(reader.pages[pno - 1])
-                    b = io.BytesIO(); w.write(b); b.seek(0)
+                    b = io.BytesIO()
+                    b.write(build_pdf_from_pages(orig_bytes, [pno]))
+                    b.seek(0)
                     futs[pool.submit(
                         call_fracto,
                         b.getvalue(),
@@ -2685,7 +2298,7 @@ def _cli():
 
 
                 # Concurrent upload of each doc_type group (limit = MAX_PARALLEL)
-                reader = PdfReader(io.BytesIO(orig_bytes))
+                from iwe_core.pdf_ops import build_pdf_from_pages
                 futures = {}
 
                 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2707,11 +2320,7 @@ def _cli():
                                     doc_type, company_type, parser_app, model_id, extra_acc, page_list)
 
                         if THIRD_COMBINE_PAGES:
-                            writer = PdfWriter()
-                            for pno in page_list:
-                                writer.add_page(reader.pages[pno - 1])
-                            buf = io.BytesIO(); writer.write(buf); buf.seek(0)
-                            group_bytes = buf.getvalue()
+                            group_bytes = build_pdf_from_pages(orig_bytes, page_list)
 
                             fut = pool.submit(
                                 call_fracto,
@@ -2724,10 +2333,7 @@ def _cli():
                             futures[fut] = (doc_type, Path(pdf_path).with_name(CFG.get("export", {}).get("filenames", {}).get("group_json", "{stem}_{slug}_ocr.json").format(stem=stem, slug=slug)), None)
                         else:
                             for pno in page_list:
-                                single = PdfWriter()
-                                single.add_page(reader.pages[pno - 1])
-                                b = io.BytesIO(); single.write(b); b.seek(0)
-                                page_bytes = b.getvalue()
+                                page_bytes = build_pdf_from_pages(orig_bytes, [pno])
                                 fut = pool.submit(
                                     call_fracto,
                                     page_bytes,
@@ -2753,6 +2359,12 @@ def _cli():
                                 pass
 
                             rows_list = _extract_rows(parsed)
+                            if _debug_enabled():
+                                try:
+                                    oa = [r for r in (rows_list or []) if str(r.get("Particulars","" )).strip().lower() == "other assets"]
+                                    _dprint(f"rows extracted for {doc_type}: {len(rows_list)} | other_assets={oa[:1]}")
+                                except Exception:
+                                    pass
 
                             # Append rows for combined JSON
                             try:
@@ -2769,7 +2381,14 @@ def _cli():
                                             all_keys.append(k)
                                 rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                                 df = pd.DataFrame(rows, columns=all_keys)
-                                df = sanitize_statement_df(doc_type, df)
+                                df = excel_ops._normalize_df_for_excel(doc_type, df)
+                                if _debug_enabled():
+                                    try:
+                                        _sample = df[df["Particulars"].astype(str).str.strip().str.lower()=="other assets"].head(1)
+                                        if not _sample.empty:
+                                            _dprint(f"df after sanitize [{doc_type}] other_assets=", _sample.to_dict("records")[:1])
+                                    except Exception:
+                                        pass
                                 if doc_type in combined_sheets and combined_sheets[doc_type] is not None and not combined_sheets[doc_type].empty:
                                     combined_sheets[doc_type] = pd.concat([combined_sheets[doc_type], df], ignore_index=True)
                                 else:
@@ -2786,82 +2405,16 @@ def _cli():
                 except Exception:
                     pass
                 
-                # ── Always write a single workbook with FIXED sheets; continue on failures ──
+                # Write a single workbook via the shared writer (includes Validation sheet)
                 try:
-                    # Determine output filename from config (fallback to {stem}_statements.xlsx)
-                    xlsx_name_tmpl = CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
-                    combined_excel_path = Path(pdf_path).with_name(xlsx_name_tmpl.format(stem=stem))
-
-                    import pandas as pd
-                    # Fixed sheet order from config; fallback to canonical labels if missing
-                    sheet_order = CFG.get("export", {}).get("statements_workbook", {}).get("sheet_order") \
-                        or CFG.get("labels", {}).get("canonical", []) \
-                        or sorted(combined_sheets.keys())
-
-                    with pd.ExcelWriter(combined_excel_path, engine="openpyxl") as writer:
-                        for sheet_name in sheet_order:
-                            df = combined_sheets.get(sheet_name)
-                            if df is None or df.empty:
-                                # Ensure at least a header row exists so styling logic works
-                                df = pd.DataFrame(columns=["Particulars"])
-                            safe_name = sheet_name[:31] or "Sheet"
-                            df.to_excel(writer, sheet_name=safe_name, index=False)
-
-                            # Styling & autosize
-                            ws = writer.book[safe_name]
-                            header_font  = Font(bold=True, color="FFFFFF")
-                            header_fill  = PatternFill("solid", fgColor="305496")
-                            header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-                            max_width = 60
-                            for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
-                                longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-                                width = min(max(longest + 2, 10), max_width)
-                                ws.column_dimensions[col[0].column_letter].width = width
-                                for c in col[1:]:
-                                    c.alignment = Alignment(vertical="top", wrap_text=True)
-                            if ws.max_row >= 1:
-                                for cell in ws[1]:
-                                    cell.font = header_font
-                                    cell.fill = header_fill
-                                    cell.alignment = header_align
-                            ws.freeze_panes = "A2"
-
-                        # Optional: Routing Summary sheet
-                        include_summary_cfg = EXPORT_INCLUDE_ROUTING_SUMMARY
-                        include_summary_env = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
-                        if (include_summary_cfg or include_summary_env) and routing_used:
-                            summary_cols = ["Doc Type", "Parser App ID", "Model", "Extra Accuracy", "Company Type"]
-                            summary_rows = []
-                            for dt in sheet_order:
-                                if dt in routing_used:
-                                    cfg = routing_used[dt]
-                                    summary_rows.append([
-                                        dt,
-                                        cfg.get("parser_app", ""),
-                                        cfg.get("model", ""),
-                                        str(cfg.get("extra", "")),
-                                        cfg.get("company_type", ""),
-                                    ])
-                            if summary_rows:
-                                pd.DataFrame(summary_rows, columns=summary_cols).to_excel(writer, sheet_name="Routing Summary", index=False)
-                                ws_sum = writer.book["Routing Summary"]
-                                header_font  = Font(bold=True, color="FFFFFF")
-                                header_fill  = PatternFill("solid", fgColor="305496")
-                                header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-                                max_width = 60
-                                for col in ws_sum.iter_cols(min_row=1, max_row=ws_sum.max_row):
-                                    longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-                                    width = min(max(longest + 2, 10), max_width)
-                                    ws_sum.column_dimensions[col[0].column_letter].width = width
-                                    for c in col[1:]:
-                                        c.alignment = Alignment(vertical="top", wrap_text=True)
-                                for cell in ws_sum[1]:
-                                    cell.font = header_font
-                                    cell.fill = header_fill
-                                    cell.alignment = header_align
-                                ws_sum.freeze_panes = "A2"
-
-                    logger.info("Combined Excel workbook written to %s", combined_excel_path)
+                    xlsx_path = excel_ops._write_statements_workbook(
+                        pdf_path=pdf_path,
+                        stem=stem,
+                        combined_sheets=combined_sheets,
+                        routing_used=routing_used,
+                        periods_by_doc=None
+                    )
+                    logger.info("Combined Excel workbook written to %s", xlsx_path)
 
                     # Build combined_rows from combined_sheets for JSON emission
                     combined_rows = {
@@ -2869,7 +2422,7 @@ def _cli():
                         for k, v in (combined_sheets or {}).items()
                     }
                     try:
-                        json_written_path = _write_statements_json(
+                        json_written_path = excel_ops._write_statements_json(
                             pdf_path=pdf_path,
                             stem=stem,
                             combined_rows=combined_rows,
@@ -2889,7 +2442,7 @@ def _cli():
                             print(f"[Main] Rewriting workbook with period labels; docs={list((_plabels or {}).keys())}", flush=True)
 
                             # Overwrite the workbook with proper headers (this also prints per-sheet rename maps)
-                            xlsx_out2 = _write_statements_workbook(
+                            xlsx_out2 = excel_ops._write_statements_workbook(
                                 pdf_path,
                                 stem,
                                 combined_sheets,
@@ -2911,34 +2464,25 @@ def _cli():
     
 
             else:
-                # No groups found — still create a workbook with fixed sheets (empty)
+                # No groups found — still delegate to shared writer to keep behavior consistent
                 try:
-                    xlsx_name_tmpl = CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
-                    combined_excel_path = Path(pdf_path).with_name(xlsx_name_tmpl.format(stem=stem))
-                    import pandas as pd
-                    sheet_order = CFG.get("export", {}).get("statements_workbook", {}).get("sheet_order") \
-                        or CFG.get("labels", {}).get("canonical", []) \
-                        or []
-                    with pd.ExcelWriter(combined_excel_path, engine="openpyxl") as writer:
-                        for sheet_name in sheet_order:
-                            df = pd.DataFrame(columns=["Particulars"])
-                            safe = sheet_name[:31] or "Sheet"
-                            df.to_excel(writer, sheet_name=safe, index=False)
-                            ws = writer.book[safe]
-                            header_font  = Font(bold=True, color="FFFFFF")
-                            header_fill  = PatternFill("solid", fgColor="305496")
-                            header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-                            for cell in ws[1]:
-                                cell.font = header_font
-                                cell.fill = header_fill
-                                cell.alignment = header_align
-                            ws.freeze_panes = "A2"
-                    logger.info("No groups classified; created empty workbook with fixed sheets at %s", combined_excel_path)
+                    empty_sheets: dict[str, Any] = {}
+                    xlsx_path = excel_ops._write_statements_workbook(
+                        pdf_path=pdf_path,
+                        stem=stem,
+                        combined_sheets=empty_sheets,
+                        routing_used={},
+                        periods_by_doc={}
+                    )
+                    logger.info("No groups classified; created empty workbook via writer at %s", xlsx_path)
 
                     # Also emit an (empty) combined JSON to keep interface consistent
                     try:
+                        sheet_order = CFG.get("export", {}).get("statements_workbook", {}).get("sheet_order") \
+                            or CFG.get("labels", {}).get("canonical", []) \
+                            or []
                         _empty_rows = {sn: [] for sn in sheet_order}
-                        _ = _write_statements_json(
+                        _ = excel_ops._write_statements_json(
                             pdf_path=pdf_path,
                             stem=stem,
                             combined_rows=_empty_rows,
@@ -2955,11 +2499,11 @@ def _cli():
                         logger.error("Failed to write empty combined JSON: %s", _jexc)
 
                 except Exception as exc:
-                    logger.error("Failed to write empty workbook: %s", exc)
+                    logger.error("Failed to write empty workbook via writer: %s", exc)
 
             # save Excel if requested
             if excel_out:
-                write_excel_from_ocr(results, excel_out, overrides)
+                excel_ops.write_excel_from_ocr(results, excel_out, overrides)
 
             # Timing summary
             total_time = time.time() - overall_start
@@ -2969,283 +2513,6 @@ def _cli():
             )
 
 
-def write_excel_from_ocr(
-    results: List[Dict[str, Any]],
-    output_path: str | io.BytesIO,
-    overrides: dict[str, str] | None = None,
-    *,
-    mappings: dict[str, str] | None = None,
-    template_path: str | None = None,
-    sheet_name: str | None = None,
-):
-    """
-    Write OCR rows to *output_path*.
-
-    Parameters
-    ----------
-    results : list[dict]
-        Fracto API responses (or pre‑loaded JSON) – list of results.
-    output_path : str | io.BytesIO
-        Where to write the Excel workbook.
-    overrides : dict[str, str], optional
-        {column_name: value} pairs forced into every row (e.g. constant HS‑Code).
-    mappings : dict[str, str], optional
-        Column → source‑field mapping. Defaults to the global MAPPINGS.
-    template_path : str | Path, optional
-        Path to an .xlsx template to use as a base (preserves styles).
-    sheet_name : str, optional
-        Which sheet inside the template/workbook to write into. Defaults to the
-        first/active sheet.
-    """
-    mappings = mappings or MAPPINGS
-    template_path = template_path or TEMPLATE_PATH
-    sheet_name = sheet_name or SHEET_NAME
-    overrides = overrides or {}
-
-    headers = list(mappings.keys())
-
-    # Keep only overrides whose column exists in the header list
-    overrides = {k: v for k, v in overrides.items() if k in headers}
-
-    # Load or create workbook
-    if template_path and Path(template_path).expanduser().exists():
-        wb = load_workbook(Path(template_path).expanduser())
-    else:
-        wb = Workbook()
-
-    # Select or create target sheet
-    if sheet_name and sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-    else:
-        ws = wb.active
-
-    # Clear existing data
-    ws.delete_rows(1, ws.max_row)
-
-    # ── Gather rows from results ──
-    all_rows: list[dict] = []
-    for result in results:
-        payload = result.get("data", [])
-        rows = _extract_rows(payload)
-        all_rows.extend(rows)
-
-    # Header row
-    ws.append(headers)
-
-    # Write data rows
-    written = 0
-    for row in all_rows:
-        excel_row = []
-        for col in headers:
-            src_field = mappings.get(col, col)
-            value = overrides.get(col, row.get(src_field, ""))
-            excel_row.append(value)
-        ws.append(excel_row)
-        written += 1
-
-    # Convert numeric-like columns to proper numbers
-    import pandas as pd
-    for idx, _ in enumerate(headers, start=1):
-        values = [ws.cell(row=r, column=idx).value for r in range(2, ws.max_row + 1)]
-        series = pd.Series(values).replace("", pd.NA)
-        converted = pd.to_numeric(series, errors="coerce")
-        if converted.isna().eq(series.isna()).all():
-            for r, val in enumerate(converted, start=2):
-                if pd.isna(val):
-                    ws.cell(row=r, column=idx).value = None
-                else:
-                    fval = float(val)
-                    ws.cell(row=r, column=idx).value = int(fval) if fval.is_integer() else fval
-
-    # ── Styling (same as before) ──
-    header_font  = Font(bold=True, color="FFFFFF")
-    header_fill  = PatternFill("solid", fgColor="305496")
-    header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-    thin_border  = Side(border_style="thin", color="999999")
-    border       = Border(left=thin_border, right=thin_border, top=thin_border, bottom=thin_border)
-
-    for cell in ws[1]:
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        cell.border = border
-
-    max_width = 60
-    for column in ws.iter_cols(min_row=1, max_row=ws.max_row):
-        longest = max(len(str(c.value)) if c.value is not None else 0 for c in column)
-        width = min(max(longest + 2, 10), max_width)
-        ws.column_dimensions[column[0].column_letter].width = width
-        for c in column[1:]:
-            c.border = border
-            c.alignment = Alignment(vertical="top", wrap_text=True)
-
-    ws.freeze_panes = "A2"
-    ws.sheet_view.showGridLines = True
-
-    # Zebra striping for readability
-    stripe_fill = PatternFill("solid", fgColor="F2F2F2")
-    for r in range(2, ws.max_row + 1):
-        if r % 2 == 0:
-            for c in ws[r]:
-                c.fill = stripe_fill
-
-    # Save
-    if isinstance(output_path, io.BytesIO):
-        wb.save(output_path)
-    else:
-        wb.save(str(output_path))
-
-    logger.info(
-        "Excel written to %s (%d rows, %d columns)",
-        output_path if isinstance(output_path, str) else "<buffer>",
-        written,
-        len(headers),
-    )
-
-def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes | None:
-    """
-    Robust multi-sheet workbook creator:
-      • 1st pass (per-page) to shortlist pages
-      • Expand selection by ±1 neighbour page to catch 'continued' pages
-      • 2nd pass to classify
-      • Header-based heuristics + smoothing to fix obviously wrong labels / 'Others'
-      • 3rd pass per doc_type; each statement in its own sheet
-    Returns workbook bytes or None.
-    """
-    # 1) First pass
-    results = call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=EXTRA_ACCURACY_FIRST)
-
-    total_pages = len(results) if results else 0
-    selected_pages = [
-        idx + 1
-        for idx, res in enumerate(results or [])
-        if (res.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "Others").strip().lower() != "others"
-    ]
-    # Be lenient: include neighbours so we don't miss page-2 of P&L/Cashflow
-    selected_pages = expand_selected_pages(selected_pages, total_pages, radius=1)
-    if not selected_pages:
-        return None
-
-    # Build selected.pdf
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    w = PdfWriter()
-    for pno in selected_pages:
-        w.add_page(reader.pages[pno - 1])
-    tmp = io.BytesIO(); w.write(tmp); tmp.seek(0)
-    selected_bytes = tmp.getvalue()
-
-    # 2) Second pass
-    stem = Path(original_filename).stem
-    second_res = call_fracto(
-        selected_bytes,
-        f"{stem}_selected.pdf",
-        parser_app=SECOND_PARSER_APP_ID,
-        model=SECOND_MODEL_ID,
-        extra_accuracy=EXTRA_ACCURACY_SECOND,
-    )
-
-    # 3) Classification (with fallback)
-    classification = (
-        second_res.get("data", {}).get("parsedData", {}).get("page_wise_classification", [])
-        if isinstance(second_res, dict) else []
-    ) or []
-    if not classification:
-        classification = [
-            {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
-            for i, r in enumerate(results or [])
-            if (r.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "Others").strip().lower() != "others"
-        ]
-        classification = [it for it in classification if (it["page_number"] in selected_pages)]
-    groups = build_groups(selected_pages, classification, pdf_bytes)
-    if not groups:
-        return None
-
-    # 4) Third pass per group (sequential to be Cloud-friendly)
-    import pandas as pd
-    combined_sheets: dict[str, pd.DataFrame] = {}
-    routing_used: dict[str, dict] = {}
-
-    for doc_type, page_list in groups.items():
-        page_list = sorted(page_list)
-        gw = PdfWriter()
-        for pno in page_list:
-            gw.add_page(reader.pages[pno - 1])
-        b = io.BytesIO(); gw.write(b); b.seek(0)
-        group_bytes = b.getvalue()
-
-        parser_app, model_id, extra_acc = _resolve_routing(doc_type)
-        routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc}
-
-        group_res = call_fracto(
-            group_bytes,
-            f"{stem}_{doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')}.pdf",
-            parser_app=parser_app,
-            model=model_id,
-            extra_accuracy=extra_acc,
-        )
-        parsed = group_res.get("data", {}).get("parsedData", [])
-        if isinstance(parsed, list) and parsed:
-            all_keys = []
-            for row in parsed:
-                for k in row.keys():
-                    if k not in all_keys:
-                        all_keys.append(k)
-            rows = [{k: r.get(k, "") for k in all_keys} for r in parsed]
-            df = pd.DataFrame(rows, columns=all_keys)
-            # Light cleanups
-            df = sanitize_statement_df(doc_type, df)
-            # Keep original LLM order unless explicitly enabled via env
-            try:
-                import os as _os
-                if str(_os.getenv("IWEALTH_ENABLE_REORDER", "0")).strip() in {"1", "true", "yes"}:
-                    df = reorder_dataframe_sections_first(df)
-            except Exception:
-                pass
-            combined_sheets[doc_type] = df
-
-    if not combined_sheets:
-        return None
-
-    # 5) Write workbook to bytes (styled)
-    out_buf = io.BytesIO()
-    with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-        for sheet_name, df in combined_sheets.items():
-            safe = sheet_name[:31] or "Sheet"
-            df.to_excel(writer, sheet_name=safe, index=False)
-            ws = writer.book[safe]
-            header_font  = Font(bold=True, color="FFFFFF")
-            header_fill  = PatternFill("solid", fgColor="305496")
-            header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
-            max_width = 60
-            for col in ws.iter_cols(min_row=1, max_row=ws.max_row):
-                longest = max(len(str(c.value)) if c.value is not None else 0 for c in col)
-                width = min(max(longest + 2, 10), max_width)
-                ws.column_dimensions[col[0].column_letter].width = width
-                for c in col[1:]:
-                    c.alignment = Alignment(vertical="top", wrap_text=True)
-            for cell in ws[1]:
-                cell.font = header_font
-                cell.fill = header_fill
-                cell.alignment = header_align
-            ws.freeze_panes = "A2"
-
-        # Optional routing summary
-        include_summary = str(os.getenv("FRACTO_INCLUDE_ROUTING_SUMMARY", "false")).strip().lower() in ("1","true","yes","y","on")
-        if include_summary and routing_used:
-            rows = []
-            for dt in sorted(routing_used):
-                cfg = routing_used[dt]
-                rows.append([dt, cfg.get("parser_app",""), cfg.get("model",""), str(cfg.get("extra",""))])
-            pd.DataFrame(rows, columns=["Doc Type","Parser App ID","Model","Extra Accuracy"]).to_excel(writer, sheet_name="Routing Summary", index=False)
-            ws = writer.book["Routing Summary"]
-            for cell in ws[1]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="305496")
-                cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
-            ws.freeze_panes = "A2"
-
-    out_buf.seek(0)
-    return out_buf.getvalue()
 
 def _renumber_serials(results: list[dict],
                       json_field: str = "Serial_Number",
@@ -3265,6 +2532,98 @@ def _renumber_serials(results: list[dict],
             counter += 1
 
 
+# (Compatibility re-exports removed to avoid pyflakes redefinition warnings.)
+
 # ─── Main Entry Point ────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Support a fast path: build workbook directly from third-pass group JSONs
+    # Usage:
+    #   python a.py from-json <out.xlsx> <group1_ocr.json> [<group2_ocr.json> ...] [--pdf /path/to/original.pdf]
+    try:
+        argv = sys.argv[1:]
+        if argv and argv[0] in {"from-json", "--from-json"}:
+            out_xlsx = None
+            pdf_hint = None
+            jsons = []
+            it = iter(argv[1:])
+            for tok in it:
+                if tok == "--pdf":
+                    try:
+                        pdf_hint = next(it)
+                    except StopIteration:
+                        pdf_hint = None
+                    continue
+                if out_xlsx is None and tok.lower().endswith((".xlsx",".xlsm",".xls")):
+                    out_xlsx = tok
+                    continue
+                jsons.append(tok)
+            if not jsons:
+                print("from-json mode: provide one or more *_ocr.json files")
+                sys.exit(1)
+            base = Path(jsons[0]).expanduser().resolve()
+            if out_xlsx is None:
+                out_xlsx = str(base.with_name(f"{base.stem.replace('_ocr','')}_statements.xlsx"))
+            stub_pdf = pdf_hint or str(base.with_suffix('.pdf'))
+            # Build combined_sheets and periods map
+            import pandas as pd, json as _json
+            combined_sheets: dict[str, pd.DataFrame] = {}
+            periods_by_doc: dict[str, dict] = {}
+            for jp in jsons:
+                p = Path(jp).expanduser().resolve()
+                try:
+                    obj = _json.loads(Path(p).read_text(encoding='utf-8'))
+                except Exception:
+                    print(f"[from-json] Skip unreadable JSON: {p}")
+                    continue
+                pd_payload = ((obj.get('data') or {}).get('parsedData')) or obj.get('parsedData') or {}
+                if not isinstance(pd_payload, (dict,list)):
+                    continue
+                # Derive doc type and normalize
+                try:
+                    dt_guess = _doc_type_from_payload(pd_payload)
+                except Exception:
+                    dt_guess = None
+                if not dt_guess:
+                    slug = p.stem
+                    dt_guess = normalize_doc_type(slug.replace('_',' '))
+                doc_type = normalize_doc_type(dt_guess)
+                # Extract rows and make DF
+                rows = _extract_rows(pd_payload)
+                if not rows:
+                    continue
+                # Union all keys for stable columns
+                all_keys = []
+                for r in rows:
+                    for k in r.keys():
+                        if k not in all_keys:
+                            all_keys.append(k)
+                df = pd.DataFrame([{k: r.get(k, '') for k in all_keys} for r in rows], columns=all_keys)
+                df = sanitize_statement_df(doc_type, df)
+                combined_sheets[doc_type] = df
+                # Periods
+                try:
+                    by_id, _labels = _extract_period_maps_from_payload(pd_payload if isinstance(pd_payload, dict) else {})
+                    if by_id:
+                        periods_by_doc[doc_type] = by_id
+                except Exception:
+                    pass
+            if not combined_sheets:
+                print("from-json mode: no sheets built from provided JSONs")
+                sys.exit(2)
+            # Call shared workbook writer
+            stem = Path(out_xlsx).stem.replace('_statements','')
+            xlsx_path = excel_ops._write_statements_workbook(stub_pdf, stem, combined_sheets, routing_used=None, periods_by_doc=periods_by_doc)
+            # Move/rename to desired out_xlsx if different
+            try:
+                out_xlsx_p = Path(out_xlsx).expanduser().resolve()
+                if str(out_xlsx_p) != str(Path(xlsx_path).expanduser().resolve()):
+                    Path(xlsx_path).replace(out_xlsx_p)
+                    xlsx_path = str(out_xlsx_p)
+            except Exception:
+                pass
+            print(f"[from-json] Workbook written → {xlsx_path}")
+            sys.exit(0)
+    except Exception as _e:
+        print("[from-json] Failed:", _e)
+    # Default CLI
     _cli()

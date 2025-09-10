@@ -1,0 +1,60 @@
+[MASTER]
+jobs=1
+persistent=yes
+
+[FORMAT]
+# Relax to accommodate generated/long strings
+max-line-length=200
+
+[MESSAGES CONTROL]
+disable=
+    duplicate-code,
+    line-too-long,
+    trailing-whitespace,
+    superfluous-parens,
+    missing-module-docstring,
+    missing-function-docstring,
+    too-many-lines,
+    wrong-import-position,
+    import-outside-toplevel,
+    reimported,
+    too-many-locals,
+    too-many-branches,
+    too-many-statements,
+    too-many-arguments,
+    too-many-positional-arguments,
+    wrong-import-order,
+    ungrouped-imports,
+    unused-variable,
+    broad-exception-caught,
+    global-statement,
+    multiple-statements,
+    multiple-imports,
+    pointless-string-statement,
+    redefined-outer-name,
+    exec-used,
+    trailing-newlines
+    ,consider-using-from-import
+    ,too-many-return-statements
+    ,too-many-boolean-expressions
+    ,unnecessary-lambda-assignment
+    ,too-many-nested-blocks
+    ,unnecessary-comprehension
+    ,useless-return
+    ,unused-argument
+    ,invalid-name
+    ,protected-access
+    ,unexpected-keyword-arg
+    ,duplicate-except
+    ,possibly-unused-variable
+    ,missing-final-newline
+    ,no-name-in-module
+    ,no-member
+    ,unused-import
+    ,consider-using-enumerate
+    ,consider-using-in
+    ,global-variable-not-assigned
+    ,no-else-break
+
+[REPORTS]
+score=yes

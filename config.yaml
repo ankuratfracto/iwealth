@@ -6,6 +6,12 @@ api:
   api_key_env: "FRACTO_API_KEY"     # read the key from env at runtime
   api_key: "IWE-BHA-84AD66-MLMPC2-7XU5Z196"  # fallback if env var not set
   timeout_seconds: 300              # per-request timeout
+  # Optional: include qr_range form field in OCR requests
+  # When enabled, a form field qr_range: "<value>" is sent along with the PDF
+  # Example value "0" mirrors curl: --form 'qr_range="0"'
+  qr_range:
+    enable: false
+    value: "0"
 
 concurrency:
   chunk_size_pages: 1
@@ -34,8 +40,8 @@ passes:
         - all_pages                    # fallback 2: include everything
   second:
     parser_app: "pDJoI1nbLM6TvD5u"     # second-pass (selected.pdf) classifier
-    model: "tv6"
-    extra_accuracy: true
+    model: "gv1"
+    extra_accuracy: false
     save_selected_json: true
     selected_json_name: "{stem}_selected_ocr.json"
     selected_pdf_name:  "{stem}_selected.pdf"
@@ -43,7 +49,7 @@ passes:
   filter:
     enable: false                  # turn off to skip quick pruning
     parser_app: "pDJoI1nbLM6TvD5u"   # reuse the classifier; set your nano/light parserApp if different
-    model: "tv7"                 # set the tiny model you have (fallbacks to your config if unavailable)
+    model: "tv6"                 # set the tiny model you have (fallbacks to your config if unavailable)
     extra_accuracy: false
     min_pages_to_run: 6           # only run this filter if ≥ N pages are selected
     keep_if_has_two: true         # always keep mixed pages
@@ -197,31 +203,34 @@ company_type_prior:                     # soft prior; never a hard gate
 
 routing:                                # per (company_type × doc_type)
   # doc_type keys must be lower-case canonical labels
+  # When true, a disabled parser (enable: false) will cause that doc type to be skipped
+  # instead of falling back to a different parser.
+  skip_on_disabled: true
   corporate:
-    consolidated balance sheet:             { parser: "LAbiI5cdwNweFo7y", model: "gv3", extra: true }
+    consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
     # done
-    standalone balance sheet:               { parser: "lP6pytmenTWIbqTs", model: "gv3", extra: true }
+    standalone balance sheet:               { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
     # done
-    consolidated profit and loss statement: { parser: "qzUWGg2koicgfDjS", model: "gv3", extra: true }
+    consolidated profit and loss statement: { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
     # done
-    standalone profit and loss statement:   { parser: "AVYIoCJI1gcmFxpr", model: "gv3", extra: true }
+    standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
     # done
-    consolidated cashflow:                  { parser: "LOKukjCXgxKDFaBF", model: "gv3", extra: true }
+    consolidated cashflow:                  { parser: "LOKukjCXgxKDFaBF", model: "tv6", extra: true, enable: false }
     # done
-    standalone cashflow:                    { parser: "LOKukjCXgxKDFaBF", model: "gv3", extra: true }
+    standalone cashflow:                    { parser: "LOKukjCXgxKDFaBF", model: "tv6", extra: true, enable: false }
     # done
   bank:
-    consolidated balance sheet:             { parser: "vVWw2KvKj4VOpLB5", model: "gv3", extra: true }
+    consolidated balance sheet:             { parser: "JZRkn5y0kkSmABvy", model: "tv6", extra: true, enable: true }
     # done
-    standalone balance sheet:               { parser: "P4xzoeUxvctFNB2U", model: "gv3", extra: true }
+    standalone balance sheet:               { parser: "JZRkn5y0kkSmABvy", model: "tv6", extra: true, enable: true }
     # done
-    consolidated profit and loss statement: { parser: "yP3VBOPa0t6bNf3i", model: "gv3", extra: true }
+    consolidated profit and loss statement: { parser: "5o14rnboPfr82BG9", model: "tv6", extra: true, enable: true }
     # done
-    standalone profit and loss statement:   { parser: "YrXa2Jwuj3icIX1c", model: "gv3", extra: true }
+    standalone profit and loss statement:   { parser: "5o14rnboPfr82BG9", model: "tv6", extra: true, enable: true }
     # done
-    consolidated cashflow:                  { parser: "zIPeLWCJmfLlseOb", model: "gv3", extra: true }
+    consolidated cashflow:                  { parser: "zIPeLWCJmfLlseOb", model: "tv6", extra: true, enable: true }
     # done
-    standalone cashflow:                    { parser: "o2JM9jlI6E0ortkp", model: "gv3", extra: true }
+    standalone cashflow:                    { parser: "o2JM9jlI6E0ortkp", model: "tv6", extra: true, enable: true }
     # done
   nbfc: {}
   insurance: {}
@@ -229,6 +238,11 @@ routing:                                # per (company_type × doc_type)
     - "company_type_and_doc_type"    # exact match
     - "corporate_and_doc_type"       # generic fallback
     - "third_defaults"               # passes.third.defaults
+  # Optional global parser toggles for testing
+  # If 'allowed_parsers' is non-empty, only those parser IDs will be used.
+  # Parsers listed under 'blocked_parsers' are never used.
+  allowed_parsers: []
+  blocked_parsers: []
 
 units_and_scaling:
   unit_header_patterns:
@@ -258,10 +272,74 @@ validation:
     balance_sheet:
       enforce_equation: true         # Assets ≈ Equity + Liabilities
       pct_tolerance: 0.015           # 1.5% or rounding tolerance (whichever higher)
+      # New: verify each section's Total equals sum of its items
+      sum_subitems:
+        enable: true
+        tolerance_pct: 0.001         # allow 0.1% rounding noise
+        abs_min: 1.0                 # or at least 1 unit (per your data unit)
+      # Fine-grained toggles for which validations to run
+      declared_components: true          # only totals/subtotals with explicit `components`
+      children_without_components: false # turn OFF unless explicitly needed
+      section_checks: false              # turn OFF: only declared requested
+      section_equality: false            # turn OFF: only declared requested
+      contiguous_block_fallback: false  # turn OFF: only declared requested
+      composed_and_grand: false         # turn OFF: only declared requested
     profit_and_loss:
+      enable: true
+      tolerance_pct: 0.005
+      abs_min: 1.0
       require_eps_block: true
+      use_declared_components_first: true
+      declared_only: false            # allow fallback when components are not declared
+      max_components: 10              # cap for brute-force; keep small if allow_subset=true
+      allow_subset: true              # explore +/-/drop combinations (3^N on <= max_components)
     cashflow:
       enforce_cash_tie: true         # CFO + CFI + CFF ≈ Δ cash; tie to opening/closing
+  # Company-type specific validation profiles (regex, case-insensitive)
+  profiles:
+    corporate:
+      tolerance_pct: 0.001
+      abs_min: 1
+      exclude_from_sum_patterns:
+        - '^total\\b'
+        - '^subtotal\\b'
+        - '^equity\\s+attributable'
+      composed_totals:
+        '^total\\s*equity\\b':
+          - '^equity\\s+attributable.*(company|group)\\b'
+          - '^non[-\\s]?controlling\\s+interests\\b'
+      grand_total_map:
+        '^total\\s*assets\\b':
+          - '^total\\s*non[-\\s]?current\\s*assets\\b'
+          - '^total\\s*current\\s*assets\\b'
+        '^total\\s*equity\\s*and\\s*liabilit(?:y|ies)\\b':
+          - '^total\\s*equity\\b'
+          - '^total\\s*non[-\\s]?current\\s*liabilit(?:y|ies)\\b'
+          - '^total\\s*current\\s*liabilit(?:y|ies)\\b'
+      equality_checks:
+        - ['^total\\s*assets\\b','^total\\s*equity\\s*and\\s*liabilit(?:y|ies)\\b']
+    bank:
+      tolerance_pct: 0.0005
+      abs_min: 1
+      exclude_from_sum_patterns:
+        - '^total\\b'
+        - '^subtotal\\b'
+      grand_total_map:
+        '^total\\s*equity\\s*and\\s*liabilit(?:y|ies)\\b':
+          - '^capital\\b'
+          - '^reserves?\\s*and\\s*surplus\\b'
+          - '^deposits\\b'
+          - '^borrowings\\b'
+          - '^other\\s*liabilit(?:y|ies)\\s*and\\s*provisions\\b'
+        '^total\\s*assets\\b':
+          - '^cash\\s*(?:&|and)\\s*balances?\\s*with\\s*(?:reserve\\s*bank\\s*of\\s*india|rbi)\\b'
+          - '^balances?\\s*with\\s*banks.*short\\s*notice\\b'
+          - '^investments\\b'
+          - '^advances\\b'
+          - '^fixed\\s*assets\\b'
+          - '^other\\s*assets\\b'
+      equality_checks:
+        - ['^total\\s*assets\\b','^total\\s*equity\\s*and\\s*liabilit(?:y|ies)\\b']
 
 export:
   statements_workbook:
@@ -273,6 +351,8 @@ export:
       - Standalone Profit and Loss Statement
       - Standalone Cashflow
     include_routing_summary: true
+    include_validation_sheet: true       # add Validation sheet with sum checks
+    validation_sheet_name: "Validation"
     # Use a boolean or a per-sheet map. Enable labels for Cashflow too.
     use_period_labels:
       default: true
@@ -296,6 +376,14 @@ logging:
   level: "INFO"
   json: false
   include_timing: true
+
+# Toggle extra debug output without changing environment variables.
+# Env vars still override these at runtime:
+#   IWEALTH_DEBUG_JSON, IWEALTH_DEBUG_VALIDATION
+debug:
+  json_extraction: false      # enables [JSONDBG] logs
+  validation: true           # enables [VALDBG] logs
+  periods_dump: false         # writes periods_debug.json artifact next to workbook
 
 paths:
   mapping_yaml: "mapping.yaml"       # reuse your existing file

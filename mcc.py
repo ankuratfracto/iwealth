@@ -13,40 +13,31 @@ def _split_pdf_bytes(pdf_bytes: bytes,
     fragment < min_tail pages is merged into the previous chunk so it retains
     invoice context (e.g. 26 pages → 5,5,5,5,6 instead of 5,5,5,5,5,1).
     """
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    total  = len(reader.pages)
+    from iwe_core.pdf_ops import build_pdf_from_pages, get_page_count_from_bytes
+
+    total = get_page_count_from_bytes(pdf_bytes)
     if total <= chunk_size:
         return [pdf_bytes]
 
-    chunks: list[bytes] = []
-    start = 0
-    while start < total:
-        end = min(start + chunk_size, total)
-        # If this is the *last* chunk and it is tiny → back-merge with previous.
-        if total - start < min_tail and chunks:
-            # Append the remaining pages to the previous writer
-            prev_buf = io.BytesIO(chunks.pop())          # last chunk bytes
-            prev_reader = PdfReader(prev_buf)
-            writer = PdfWriter()
-            # re-copy pages of previous chunk
-            for p in prev_reader.pages:
-                writer.add_page(p)
-            # add the tail pages
-            for p in range(start, total):
-                writer.add_page(reader.pages[p])
-            buf = io.BytesIO()
-            writer.write(buf)
-            chunks.append(buf.getvalue())
-            break   # finished
-        else:
-            writer = PdfWriter()
-            for p in range(start, end):
-                writer.add_page(reader.pages[p])
-            buf = io.BytesIO()
-            writer.write(buf)
-            chunks.append(buf.getvalue())
-            start = end
+    # Compute page ranges (1-based inclusive) with tail merge
+    ranges: list[tuple[int, int]] = []
+    start = 1
+    while start <= total:
+        end = min(start + chunk_size - 1, total)
+        # If remaining pages after 'end' are a tiny tail, merge into previous
+        tail = total - end
+        if tail < min_tail and ranges:
+            prev_start, prev_end = ranges[-1]
+            ranges[-1] = (prev_start, total)
+            break
+        ranges.append((start, end))
+        start = end + 1
 
+    # Build bytes per range
+    chunks: list[bytes] = []
+    for s, e in ranges:
+        page_numbers = range(s, e + 1)
+        chunks.append(build_pdf_from_pages(pdf_bytes, page_numbers))
     return chunks
 
 def call_fracto_parallel(pdf_bytes: bytes, file_name: str) -> list[dict]:
@@ -105,7 +96,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 import yaml
 
 import requests
-from PyPDF2 import PdfReader, PdfWriter
+# Keep PyPDF2 usage local inside functions; not needed at module import
 from reportlab.pdfgen import canvas
 
 # ─── PDF Stamping Helper ──────────────────────────────────────────────

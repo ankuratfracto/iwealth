@@ -1,0 +1,15 @@
+# Ignore local files folder and common build artifacts
+
+# Project-local data that should never sync
+/files/
+
+# Python caches and virtualenvs (optional niceties)
+__pycache__/
+*.pyc
+.Python
+.venv/
+venv/
+
+# macOS metadata
+.DS_Store
+

@@ -23,7 +23,7 @@ if generate_statements_excel is None:
     from openpyxl.styles import Font as _Font, Alignment as _Alignment, PatternFill as _PatternFill
 
     def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes | None:  # type: ignore
-        from PyPDF2 import PdfReader, PdfWriter
+        # PDF page assembly handled by iwe_core.pdf_ops
         def _is_true(x):
             return str(x).strip().lower() in ("true", "1", "yes", "y")
         # 1) First pass
@@ -61,12 +61,8 @@ if generate_statements_excel is None:
             selected_pages = list(range(1, len(results) + 1))
 
         # Build selected-pages PDF for second pass
-        orig_reader = PdfReader(_io.BytesIO(pdf_bytes))
-        _w = PdfWriter()
-        for pno in selected_pages:
-            _w.add_page(orig_reader.pages[pno - 1])
-        _tmp = _io.BytesIO(); _w.write(_tmp); _tmp.seek(0)
-        selected_bytes = _tmp.getvalue()
+        from iwe_core.pdf_ops import build_pdf_from_pages
+        selected_bytes = build_pdf_from_pages(pdf_bytes, selected_pages)
 
         # 3) Second pass
         stem = Path(original_filename).stem
@@ -146,13 +142,17 @@ if generate_statements_excel is None:
         periods_hint: dict[str, dict] = {}
         for doc_type, page_list in groups.items():
             page_list = sorted(page_list)
-            _gw = PdfWriter()
-            for pno in page_list:
-                _gw.add_page(orig_reader.pages[pno - 1])
-            _b = _io.BytesIO(); _gw.write(_b); _b.seek(0)
-            group_bytes = _b.getvalue()
+            from iwe_core.pdf_ops import build_pdf_from_pages
+            group_bytes = build_pdf_from_pages(pdf_bytes, page_list)
 
             parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type, company_type=company_type)
+            if parser_app is None:
+                routing_used[doc_type] = {"parser_app": None, "model": None, "extra": None, "company_type": company_type, "skipped": True, "reason": "disabled"}
+                logging.getLogger(__name__).info(
+                    "↷ Skipping %s via company_type=%s (disabled; no fallback)",
+                    doc_type, company_type
+                )
+                continue
             routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc, "company_type": company_type}
             logging.getLogger(__name__).info(
                 "→ Routing %s via company_type=%s → parser=%s, model=%s, extra=%s, pages=%s",
@@ -390,7 +390,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     progress.progress(0.33, text=f"First pass complete in {dt0:.1f}s")
     status_write(f"✓ First pass complete in {dt0:.1f}s — {len(results)} page(s)")
 
-    from PyPDF2 import PdfReader, PdfWriter
+    # PDF page assembly handled by iwe_core.pdf_ops
     def _is_true(x):
         return str(x).strip().lower() in ("true", "1", "yes", "y")
     # 2) Select pages where has_table=true; also include pages whose headers clearly indicate a known doc type
@@ -428,12 +428,8 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=_radius)
 
     # Build selected.pdf
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    w = PdfWriter()
-    for pno in selected_pages:
-        w.add_page(reader.pages[pno - 1])
-    tmp = io.BytesIO(); w.write(tmp); tmp.seek(0)
-    selected_bytes = tmp.getvalue()
+    from iwe_core.pdf_ops import build_pdf_from_pages
+    selected_bytes = build_pdf_from_pages(pdf_bytes, selected_pages)
 
     # 3) Second pass
     status_write("2/3 Second pass — classifying selected pages …")
@@ -518,13 +514,17 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         futures = {}
         for doc_type, page_list in groups.items():
             page_list = sorted(page_list)
-            gw = PdfWriter()
-            for pno in page_list:
-                gw.add_page(reader.pages[pno - 1])
-            b = io.BytesIO(); gw.write(b); b.seek(0)
-            group_bytes = b.getvalue()
+            from iwe_core.pdf_ops import build_pdf_from_pages
+            group_bytes = build_pdf_from_pages(pdf_bytes, page_list)
 
             parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type, company_type=company_type)
+            if parser_app is None:
+                routing_used[doc_type] = {"parser_app": None, "model": None, "extra": None, "company_type": company_type, "skipped": True, "reason": "disabled"}
+                logging.getLogger(__name__).info(
+                    "↷ Skipping %s via company_type=%s (disabled; no fallback)",
+                    doc_type, company_type
+                )
+                continue
             routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc, "company_type": company_type}
             logging.getLogger(__name__).info(
                 "→ Routing %s via company_type=%s → parser=%s, model=%s, extra=%s, pages=%s",
@@ -658,7 +658,7 @@ import matplotlib.pyplot as plt
 import base64
 import logging
 # moved above to import from module `a`
-from PyPDF2 import PdfReader, PdfWriter
+from iwe_core.pdf_ops import get_page_count_from_stream
 
 # ── Page config (must be first Streamlit command) ─────────────
 st.set_page_config(
@@ -976,7 +976,7 @@ if pdf_file:
     # Show file thumbnail info
     file_size_kb = pdf_file.size / 1024
     try:
-        page_count = len(PdfReader(pdf_file).pages)
+        page_count = get_page_count_from_stream(pdf_file)
     except Exception:
         page_count = "?"
     st.info(f"**{pdf_file.name}**  •  {file_size_kb:,.1f} KB  •  {page_count} page(s)")
