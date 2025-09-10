@@ -603,8 +603,43 @@ def _series_for_row(rows: List[dict], idx: int, labels_by_id: Dict[str, str]) ->
     pidx = build_period_index(labels_by_id or {})
     by_id = (pidx.get("by_id") or {})
     items: List[Tuple[str, date, float | None]] = []
+    # Helper to fetch date meta for a column id with cN<->pN tolerance
+    def _meta_for_col(col: str) -> dict | None:
+        key = str(col).lower()
+        meta = by_id.get(key)
+        if not meta:
+            try:
+                import re as _re
+                m = _re.fullmatch(r"([cp])(\d+)", key)
+                if m:
+                    alt = ("p" if m.group(1).lower() == "c" else "c") + m.group(2)
+                    meta = by_id.get(alt)
+            except Exception:
+                meta = None
+        # Fallback: ordinal mapping when ids are year-like (e.g., '2025','2024')
+        if not meta:
+            try:
+                import re as _re
+                m = _re.fullmatch(r"([cp])(\d+)", key)
+                if m:
+                    ord_idx = int(m.group(2)) - 1
+                    # build an ordered list of period metas by end_date
+                    metas = []
+                    for k, v in (by_id or {}).items():
+                        ed = v.get('end_date') if isinstance(v, dict) else None
+                        if ed:
+                            metas.append(v)
+                    metas.sort(key=lambda mm: mm.get('end_date') or '')
+                    if 0 <= ord_idx < len(metas):
+                        meta = metas[ord_idx]
+            except Exception:
+                pass
+        return meta
+
+    # First attempt: use the row itself
     for c in cols:
-        label_meta = by_id.get(str(c).lower())
+        key = str(c).lower()
+        label_meta = _meta_for_col(key)
         dt = None
         if label_meta and label_meta.get("end_date"):
             try:
@@ -615,6 +650,36 @@ def _series_for_row(rows: List[dict], idx: int, labels_by_id: Dict[str, str]) ->
         val = _coerce_num(rows[idx].get(c))
         if dt is not None:
             items.append((c, dt, val))
+    # If row had no numeric values across period columns, try summing direct children
+    if all(v is None for (_, _, v) in items):
+        try:
+            row_id = rows[idx].get("id")
+            if row_id is not None:
+                # Build map col->sum over children with parent_id == row_id
+                sums: Dict[str, float] = {c: 0.0 for c in cols}
+                any_val = False
+                for j, r in enumerate(rows):
+                    if r.get("parent_id") == row_id:
+                        for c in cols:
+                            v = _coerce_num(r.get(c))
+                            if v is not None:
+                                sums[c] += float(v)
+                                any_val = True
+                if any_val:
+                    items = []
+                    for c in cols:
+                        meta = _meta_for_col(c)
+                        dt = None
+                        if meta and meta.get("end_date"):
+                            try:
+                                y, m, d = map(int, str(meta["end_date"]).split("-")[:3])
+                                dt = date(y, m, d)
+                            except Exception:
+                                dt = None
+                        if dt is not None:
+                            items.append((c, dt, sums.get(c)))
+        except Exception:
+            pass
     items.sort(key=lambda t: t[1])
     return items
 
@@ -860,7 +925,7 @@ def compute_core_pack(
 
     # Patterns
     rev_pat     = _pat("pl", "revenue", _DEFAULT_DENOMS["Profit And Loss Statement"])
-    ebitda_pat  = _pat("pl", "ebitda", [r"\bebitda\b", r"earnings before interest, tax, depreciation and amortisation"])  # spellings
+    ebitda_pat  = _pat("pl", "ebitda", [r"\bebitda\b", r"earnings before interest, tax, depreciation and amortisation", r"\boperating\s*profit\b"])  # spellings
     ebit_pat    = _pat("pl", "ebit", [r"\bprofit\s*before\s*interest\s*and\s*tax\b", r"\boperating\s*profit\b", r"\bebit\b"])
     np_pat      = _pat("pl", "net_profit", [r"\bprofit\s*after\s*tax\b", r"\bpat\b", r"\bnet\s*profit\b"])
     gp_pat      = _pat("pl", "gross_profit", [r"\bgross\s*profit\b"])
@@ -880,6 +945,7 @@ def compute_core_pack(
     int_exp_pat = _pat("pl", "interest_expense", [r"\bfinance\s*costs\b", r"\binterest\s*expense\b"])
     tax_exp_pat = _pat("pl", "tax_expense", [r"\btax\s*expense\b", r"\bcurrent\s*tax\b"])  # rough
     pbt_pat     = _pat("pl", "pbt", [r"\bprofit\s*before\s*tax\b", r"\bpbt\b"])
+    dep_pat     = _pat("pl", "dep_amort", [r"depreciation\s*and\s*amort", r"\bamortisation\b", r"\bdepreciation\b"])  # DA row
 
     # Build series by date
     rev  = _series_by_date(pl_rows, pl_labels, rev_pat)
@@ -903,6 +969,37 @@ def compute_core_pack(
     int_exp = _series_by_date(pl_rows, pl_labels, int_exp_pat)
     tax_exp = _series_by_date(pl_rows, pl_labels, tax_exp_pat)
     pbt     = _series_by_date(pl_rows, pl_labels, pbt_pat)
+    dep     = _series_by_date(pl_rows, pl_labels, dep_pat)
+
+    # Derive EBIT and EBITDA when missing
+    if not ebit and pbt and int_exp:
+        try:
+            common = _align_dates(pbt, int_exp)
+            for dt in common:
+                pv = pbt.get(dt); iv = int_exp.get(dt)
+                if pv is not None and iv is not None:
+                    ebit[dt] = float(pv) + float(iv)
+        except Exception:
+            pass
+    if not ebitda and ebit and dep:
+        try:
+            common = _align_dates(ebit, dep)
+            for dt in common:
+                ev = ebit.get(dt); dv = dep.get(dt)
+                if ev is not None and dv is not None:
+                    ebitda[dt] = float(ev) + float(dv)
+        except Exception:
+            pass
+
+    # Emit quick diagnostics for tuning (logger only)
+    try:
+        logging.getLogger(__name__).info(
+            "[core] inputs: PL_rows=%d BS_rows=%d CF_rows=%d | series: rev=%d ebitda=%d ebit=%d np=%d gp=%d ocf=%d capex=%d recv=%d pay=%d inv=%d assets=%d equity=%d debt=%d cash=%d",
+            len(pl_rows or []), len(bs_rows or []), len(cf_rows or []),
+            len(rev), len(ebitda), len(ebit), len(np), len(gp), len(ocf), len(capex), len(recv), len(pay), len(inv), len(assets), len(equity), len(debt), len(cash)
+        )
+    except Exception:
+        pass
 
     # Growth & margins
     dates = sorted(set(rev.keys()))

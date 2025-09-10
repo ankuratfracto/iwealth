@@ -12,8 +12,10 @@ from pathlib import Path
 import json as _json
 
 from iwe_core import json_ops
+from iwe_core import analytics as _analytics
 from iwe_core import excel_ops as _excel
 from iwe_core.grouping import normalize_doc_type
+from iwe_core.config import CFG
 
 
 def from_json_to_workbook(out_xlsx: str | None, json_paths: List[str], pdf_hint: str | None = None) -> str:
@@ -187,14 +189,14 @@ def _compute_analytics_for_combined_json(obj: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 labels[str(k).lower()] = str(v)
         try:
-            units = json_ops._analytics.detect_units_and_currency({}, rows)  # type: ignore[attr-defined]
+            units = _analytics.detect_units_and_currency({}, rows)
         except Exception:
             units = {}
-        period_idx = json_ops._analytics.build_period_index(labels)  # type: ignore[attr-defined]
-        qflags = json_ops._analytics.quality_flags(doc_type, rows, labels)  # type: ignore[attr-defined]
-        footrefs = json_ops._analytics.extract_footnote_refs(rows)  # type: ignore[attr-defined]
-        period_math = json_ops._analytics.compute_period_math(doc_type, rows, labels)  # type: ignore[attr-defined]
-        common_size = json_ops._analytics.compute_common_size(doc_type, rows, labels)  # type: ignore[attr-defined]
+        period_idx = _analytics.build_period_index(labels)
+        qflags = _analytics.quality_flags(doc_type, rows, labels)
+        footrefs = _analytics.extract_footnote_refs(rows)
+        period_math = _analytics.compute_period_math(doc_type, rows, labels)
+        common_size = _analytics.compute_common_size(doc_type, rows, labels)
         if common_size and not bool(((CFG.get("analytics", {}) or {}).get("common_size", {}) or {}).get("include_rows", True)):
             common_size = {k: v for k, v in common_size.items() if k != "rows"}
         analytics_out[doc_type] = {
@@ -214,8 +216,46 @@ def _compute_analytics_for_combined_json(obj: Dict[str, Any]) -> Dict[str, Any]:
         core = _analytics.compute_core_pack(combined_rows, periods_by_doc, cfg=(CFG.get("analytics", {}) or {}))
         if core:
             data["analytics"]["core"] = core
-    except Exception:
-        pass
+            # Print and log a concise summary for visibility
+            try:
+                import logging as _logging
+                _log = _logging.getLogger(__name__)
+                gm = core.get("growth_margin", {}).get("margins_pct", {})
+                cc = core.get("cash_conversion", {})
+                wc = core.get("working_capital_ccc", {})
+                pr = core.get("profitability", {})
+                print("[analyze] Core summary:")
+                print(f"  margins: gross={len(gm.get('gross', {}))} ebitda={len(gm.get('ebitda', {}))} ebit={len(gm.get('ebit', {}))} np={len(gm.get('np', {}))}")
+                print(f"  cash: ocf={len(cc.get('ocf', {}))} fcf={len(cc.get('fcf', {}))} fcf_margin={len(cc.get('fcf_margin_pct', {}))} ccr={len(cc.get('cash_conversion_ratio', {}))}")
+                print(f"  wc: dso={len(wc.get('dso_days', {}))} dpo={len(wc.get('dpo_days', {}))} dio={len(wc.get('dio_days', {}))} ccc={len(wc.get('ccc_days', {}))}")
+                print(f"  profit: roe={len(pr.get('roe_pct', {}))} roic={len(pr.get('roic_pct', {}))} spread={len(pr.get('spread_vs_wacc_pct', {}))}")
+                # Show sample values (first 3 keys) for quick sanity
+                def _sample(d: dict):
+                    try:
+                        keys = sorted(d.keys())[:3]
+                        return {k: d[k] for k in keys}
+                    except Exception:
+                        return {}
+                print("[analyze] Samples:")
+                print("  EBITDA margin sample:", _sample(gm.get('ebitda', {}) or {}))
+                print("  NP margin sample:", _sample(gm.get('np', {}) or {}))
+                print("  OCF sample:", _sample(cc.get('ocf', {}) or {}))
+                print("  FCF sample:", _sample(cc.get('fcf', {}) or {}))
+                print("  DSO/DPO/DIO sample:",
+                      _sample(wc.get('dso_days', {}) or {}),
+                      _sample(wc.get('dpo_days', {}) or {}),
+                      _sample(wc.get('dio_days', {}) or {}))
+                _log.info("[analyze] core sizes → margins:%s cash:%s wc:%s profitability:%s",
+                          {k: len(v or {}) for k, v in (gm or {}).items()},
+                          {k: len(v or {}) for k, v in (cc or {}).items()},
+                          {k: len(v or {}) for k, v in (wc or {}).items()},
+                          {k: len(v or {}) for k, v in (pr or {}).items()},)
+            except Exception:
+                pass
+        else:
+            print("[analyze] Core pack computed empty — check KPI patterns and period matching")
+    except Exception as e:
+        print(f"[analyze] core computation failed: {e}")
     return data
 
 def run_analyze_argv(argv: List[str]) -> int:

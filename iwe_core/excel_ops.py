@@ -493,9 +493,36 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             print(f"[Excel] Writer created: engine=openpyxl, book_type={type(writer.book).__name__}", flush=True)
         except Exception:
             pass
+
+        # Track whether any real statement/routing/periods sheet was written
+        wrote_any_real_sheet = False
+
         validation_rows: list[list] = []
 
-        wrote_any_real_sheet = False
+        # Pre-write one sheet early to guarantee at least one visible sheet exists
+        first_written = False
+        first_name: str | None = None
+        try:
+            for cand in sheet_order:
+                df0 = combined_sheets.get(cand)
+                if df0 is None:
+                    continue
+                first_name = cand
+                try:
+                    df_pre = _normalize_df_for_excel(cand, df0.copy())
+                except Exception:
+                    df_pre = df0
+                try:
+                    df_pre = _sanitize_df_for_excel(df_pre)
+                except Exception:
+                    pass
+                safe0 = _unique_sheet_name(cand)
+                df_pre.to_excel(writer, sheet_name=safe0, index=False)
+                wrote_any_real_sheet = True
+                first_written = True
+                break
+        except Exception:
+            pass
 
         def _pick_company_type_from_routing(routing: dict | None) -> str:
             try:
@@ -1685,15 +1712,19 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             # Declared totals first (recommended)
             # use module-level _parse_components_value
 
+            # Validate ONLY rows that have non-empty calculation_references
             comp_col = None
-            if use_declared_first:
-                if set(["id","row_type","calculation_references"]).issubset(set(map(str, df.columns))):
-                    comp_col = "calculation_references"
-                elif set(["id","row_type","components"]).issubset(set(map(str, df.columns))):
-                    comp_col = "components"
+            if use_declared_first and set(["id","row_type","calculation_references"]).issubset(set(map(str, df.columns))):
+                comp_col = "calculation_references"
             if comp_col is not None:
-                # Validate ALL rows that declare components, irrespective of row_type
-                tot_mask = df.get(comp_col).apply(lambda x: str(x).strip() != "")
+                # Strict: only rows with actual calculation_references content
+                def _has_calc_refs(x) -> bool:
+                    try:
+                        arr = _parse_components_value(x)
+                        return bool(arr)
+                    except Exception:
+                        return False
+                tot_mask = df.get(comp_col).apply(_has_calc_refs)
                 for t_idx in list(df.index[tot_mask]):
                     comp_ids = _parse_components_value(df.at[t_idx, comp_col]) or []
                     comp_idxs = _expand_to_items(comp_ids)
@@ -1740,6 +1771,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                         except Exception:
                             pass
 
+            # If only declared references are allowed (default), stop here
             if declared_only:
                 return
 
@@ -1818,6 +1850,9 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             return bool(val)
 
     for sheet_name in sheet_order:
+        if first_written and first_name == sheet_name:
+            # Already wrote this one in the pre-write block
+            continue
         _sheet_t0 = time.perf_counter()
         df = combined_sheets.get(sheet_name)
         if df is None or getattr(df, "empty", True):
@@ -2244,7 +2279,37 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     cell.alignment = header_align
                 ws_p.freeze_panes = "A2"
 
-        # no placeholder sheet used
+        # If nothing was written and no seed handling occurred, add a minimal visible sheet so the workbook is valid
+        if not wrote_any_real_sheet:
+            try:
+                import pandas as _pd
+                summary_rows = []
+                try:
+                    for _name, _df in (combined_sheets or {}).items():
+                        _rows = int(getattr(_df, 'shape', (0, 0))[0]) if _df is not None else 0
+                        summary_rows.append([str(_name), _rows])
+                except Exception:
+                    pass
+                if not summary_rows:
+                    summary_rows = [["No visible data", 0]]
+                _pd.DataFrame(summary_rows, columns=["Sheet (input)", "Row count"]).to_excel(
+                    writer, sheet_name="Summary", index=False
+                )
+                try:
+                    ws_sum = writer.book["Summary"]
+                    header_font  = Font(bold=True, color=header_font_color)
+                    header_fill  = PatternFill("solid", fgColor=header_fill_hex)
+                    header_align = Alignment(vertical="center", horizontal="center", wrap_text=True)
+                    for cell in ws_sum[1]:
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = header_align
+                    ws_sum.freeze_panes = "A2"
+                except Exception:
+                    pass
+            except Exception:
+                # Fallback placeholder failed; ignore to avoid aborting save
+                pass
 
     # At the end, optionally write periods debug JSON
     try:
@@ -2272,6 +2337,30 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             f"        sheets={wb_verify.sheetnames} size={_size}B load_time={_t_verify1 - _t_verify0:.3f}s",
             flush=True,
         )
+        # Robust fallback: if too few sheets were persisted, rewrite in simple mode
+        try:
+            expected = sum(1 for _name, _df in (combined_sheets or {}).items() if _df is not None and not getattr(_df, 'empty', True))
+            actual   = len([s for s in wb_verify.sheetnames])
+            if expected >= 2 and actual <= 1:
+                print("[Excel] WARN: workbook saved with fewer sheets than expected — rewriting in simple mode…", flush=True)
+                import pandas as _pd
+                with _pd.ExcelWriter(out_path, engine="openpyxl") as _w2:
+                    for sname in sheet_order:
+                        df0 = combined_sheets.get(sname)
+                        if df0 is None or getattr(df0, 'empty', True):
+                            continue
+                        try:
+                            df2 = _normalize_df_for_excel(sname, df0.copy())
+                        except Exception:
+                            df2 = df0
+                        df2 = _sanitize_df_for_excel(df2)
+                        _safe = (sname[:31] or 'Sheet')
+                        df2.to_excel(_w2, sheet_name=_safe, index=False)
+                # Re-open and report
+                wb_verify = load_workbook(out_path)
+                print(f"[Excel] Rewrite complete — sheets now: {wb_verify.sheetnames}", flush=True)
+        except Exception as _re:
+            print(f"[Excel] WARN: simple rewrite attempt failed: {_re}", flush=True)
     except Exception as _ve:
         try:
             _size = os.path.getsize(out_path) if os.path.exists(out_path) else -1
@@ -2426,7 +2515,8 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                 val_cols = [
                     "Doc Type", "Particulars", "Section", "Column", "Sum of Items", "Reported Total", "Difference", "Status", "Tolerance", "Details"
                 ]
-                val_df = pd.DataFrame(validation_rows, columns=val_cols)
+                # De-duplicate identical validation rows to avoid repetition in the sheet
+                val_df = pd.DataFrame(validation_rows, columns=val_cols).drop_duplicates()
                 vname = VALIDATION_SHEET_NAME[:31] or "Validation"
                 val_df.to_excel(wc, sheet_name=vname, index=False)
                 ws_v = wc.book[vname]
@@ -2438,6 +2528,18 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     cell.fill = header_fill
                     cell.alignment = header_align
                 ws_v.freeze_panes = "A2"
+                written_any = True
+
+            # Ensure at least one visible sheet exists (fallback Summary)
+            if not written_any:
+                import pandas as _pd
+                _pd.DataFrame([["No visible data"]], columns=["Status"]).to_excel(wc, sheet_name="Summary", index=False)
+                ws_s = wc.book["Summary"]
+                for cell in ws_s[1]:
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = header_align
+                ws_s.freeze_panes = "A2"
 
         print(f"[Excel] Client workbook written → {client_path}", flush=True)
     except Exception as e:
@@ -2455,7 +2557,8 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             ]
             with pd.ExcelWriter(val_only_path, engine="openpyxl") as wv:
                 # Always produce the sheet, even if empty
-                val_df = pd.DataFrame(validation_rows, columns=val_cols)
+                # De-duplicate to remove repeated validations
+                val_df = pd.DataFrame(validation_rows, columns=val_cols).drop_duplicates()
                 sheet_name = VALIDATION_SHEET_NAME[:31] or "Validation"
                 val_df.to_excel(wv, sheet_name=sheet_name, index=False)
                 ws = wv.book[sheet_name]
@@ -2474,9 +2577,10 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                         cell.alignment = header_align
                 # Banner row
                 try:
-                    total_checks = len(validation_rows)
-                    mismatch_count = sum(1 for r in validation_rows if str(r[6]).strip().upper() == "MISMATCH")
-                    doc_types = sorted({str(r[0]) for r in validation_rows})
+                    # Summary banner based on de-duplicated validations
+                    total_checks = int(len(val_df))
+                    mismatch_count = int((val_df["Status"].astype(str).str.upper() == "MISMATCH").sum()) if not val_df.empty else 0
+                    doc_types = sorted(val_df["Doc Type"].astype(str).unique().tolist()) if not val_df.empty else []
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     banner = f"Validation generated {ts} — checks: {total_checks}, mismatches: {mismatch_count}, docs: {', '.join(doc_types) if doc_types else '-'}"
                     ws.insert_rows(1)
@@ -2498,7 +2602,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                         ws.freeze_panes = "A2"
                     except Exception:
                         pass
-            print(f"[Excel] Validation-only workbook written → {val_only_path} (rows={len(validation_rows)})", flush=True)
+            print(f"[Excel] Validation-only workbook written → {val_only_path} (rows={len(val_df)})", flush=True)
     except Exception as e:
         print(f"[Excel] WARN: failed to write validations-only workbook: {e}", flush=True)
     return str(out_path)
@@ -3033,6 +3137,7 @@ def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="305496")
+            wrote_any_real_sheet = True
 
         # Write Validation sheet if we collected any
         if INCLUDE_VALIDATION_SHEET and validation_rows:
@@ -3041,7 +3146,10 @@ def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes
                 val_cols = [
                     "Doc Type","Particulars","Section","Column","Sum of Items","Reported Total","Difference","Status","Tolerance","Details"
                 ]
-                _pd.DataFrame(validation_rows, columns=val_cols).to_excel(writer, sheet_name=(VALIDATION_SHEET_NAME[:31] or "Validation"), index=False)
+                # De-duplicate to prevent repeated entries
+                _pd.DataFrame(validation_rows, columns=val_cols).drop_duplicates().to_excel(
+                    writer, sheet_name=(VALIDATION_SHEET_NAME[:31] or "Validation"), index=False
+                )
             except Exception as _e:
                 print(f"[Excel] WARN: in-memory validation sheet failed: {_e}", flush=True)
                 cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
@@ -3050,20 +3158,35 @@ def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes
                 print(f"[Excel] [mem:Routing Summary] dims rows={ws.max_row} cols={ws.max_column}", flush=True)
             except Exception:
                 pass
+            wrote_any_real_sheet = True
 
-    out_buf.seek(0)
-    try:
-        # Verify sheetnames from in-memory bytes
-        _memval = out_buf.getvalue()
-        _t_mem1 = time.perf_counter()
-        wb_mem = load_workbook(io.BytesIO(_memval))
-        _t_mem2 = time.perf_counter()
-        print(
-            f"[Excel] EXIT in-memory writer — bytes={len(_memval)} sheets={wb_mem.sheetnames} "
-            f"elapsed_total={_t_mem2 - _t_mem0:.3f}s parse_time={_t_mem2 - _t_mem1:.3f}s",
-            flush=True,
-        )
-        return _memval
-    except Exception as _eme:
-        print(f"[Excel] WARN: verifying in-memory workbook failed: {_eme}", flush=True)
-        return out_buf.getvalue()
+        # Fallback: if nothing was written (e.g., all sheets filtered as empty/non-numeric),
+        # add a minimal visible sheet so the workbook remains valid and debuggable.
+        try:
+            if not wrote_any_real_sheet:
+                import pandas as _pd
+                summary_rows = []
+                try:
+                    for _name, _df in (combined_sheets or {}).items():
+                        _rows = int(getattr(_df, 'shape', (0, 0))[0]) if _df is not None else 0
+                        summary_rows.append([str(_name), _rows])
+                except Exception:
+                    pass
+                if not summary_rows:
+                    summary_rows = [["No visible data", 0]]
+                _pd.DataFrame(summary_rows, columns=["Sheet (input)", "Row count"]).to_excel(
+                    writer, sheet_name="Summary", index=False
+                )
+                try:
+                    ws_sum = writer.book["Summary"]
+                    for cell in ws_sum[1]:
+                        cell.font = Font(bold=True, color="FFFFFF")
+                        cell.fill = PatternFill("solid", fgColor=header_fill_hex)
+                        cell.alignment = Alignment(vertical="center", horizontal="center", wrap_text=True)
+                    ws_sum.freeze_panes = "A2"
+                except Exception:
+                    pass
+                wrote_any_real_sheet = True
+        except Exception:
+            # Fallback placeholder failed; ignore to avoid aborting save
+            pass

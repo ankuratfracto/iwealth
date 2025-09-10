@@ -400,16 +400,20 @@ analytics:
   kpi_patterns:                     # regex patterns to find KPIs in rows
     pl:                             # Profit & Loss
       revenue: ['^\s*revenue\s*from\s*operations\b','^\s*total\s*income\b']
-      ebitda: ['\bebitda\b','earnings before interest, tax, depreciation and amortisation']
+      ebitda: ['\bebitda\b','earnings before interest, tax, depreciation and amortisation','\boperating\s*profit\b']
       ebit: ['profit\s*before\s*interest\s*and\s*tax','\boperating\s*profit\b','\bebit\b']
-      net_profit: ['\bprofit\s*after\s*tax\b','\bpat\b','\bnet\s*profit\b']
+      net_profit: ['^\s*profit\s*for\s*(the\s*)?(year|period)\b','\bprofit\s*after\s*tax\b','\bpat\b','\bnet\s*profit\b']
       gross_profit: ['\bgross\s*profit\b']
       cogs: ['cost\s*of\s*(goods|materials)','costs?\s*of\s*revenue']
       interest_expense: ['\bfinance\s*costs\b','\binterest\s*expense\b']
       tax_expense: ['\btax\s*expense\b','\bcurrent\s*tax\b']
       pbt: ['\bprofit\s*before\s*tax\b','\bpbt\b']
     cf:                             # Cashflow
-      ocf: ['net\s*cash\s*from\s*operating\s*activities','cash\s*generated\s*from\s*operations']
+      ocf:
+        - '(?:net\s*)?cash\s*(?:flows?\s*)?from\s*operating\s*activities'
+        - '(?:net\s*)?cash\s*(?:flows?\s*)?generated\s*from\s*operating\s*activities'
+        - 'cash\s*generated\s*from\s*operating\s*activities'
+        - 'cash\s*generated\s*from\s*operations'
       capex: ['purchase\s*of\s*property,?\s*plant\s*and\s*equipment','capital\s*expenditure']
     bs:                             # Balance Sheet
       receivables: ['\btrade\s*receivables\b','\baccounts\s*receivable\b']
