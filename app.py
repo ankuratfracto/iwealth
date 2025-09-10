@@ -700,7 +700,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
 import io, textwrap
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+# Matplotlib removed to speed up deploys; use st.bar_chart below
 import base64
 import logging
 # moved above to import from module `a`
@@ -1245,12 +1245,7 @@ if st.session_state["excel_bytes"]:
         if top_qty.empty or top_qty.shape[0] < 1:
             st.info("No Qty data available to plot.")
         else:
-            fig, ax = plt.subplots()
-            top_qty.plot(kind="barh", ax=ax)
-            ax.invert_yaxis()
-            ax.set_xlabel("Qty")
-            ax.set_ylabel("Part No.")
-            st.pyplot(fig)
+            st.bar_chart(top_qty)
 
 st.markdown("---")
 

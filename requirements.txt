@@ -1,8 +1,6 @@
 streamlit==1.36.0
 requests==2.32.3
 PyPDF2==3.0.1
-reportlab==4.2.2
 openpyxl==3.1.2
 PyYAML==6.0.2
-matplotlib==3.8.4
 pandas==2.2.2
