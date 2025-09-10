@@ -13,3 +13,10 @@ venv/
 # macOS metadata
 .DS_Store
 
+# Security/data artifacts (do not commit)
+logs/
+*.xlsx
+*_ocr.json
+*_statements.json
+config.local.yaml
+.env*

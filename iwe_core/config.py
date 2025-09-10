@@ -64,6 +64,31 @@ CFG: dict = load_config()
 __all__ = ["load_config", "CFG"]
 
 
+class SecureRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that enforces 0600 perms on created files.
+
+    Ensures the active logfile is chmod 0o600 both on initial open and
+    after each rollover, so rotated backups inherit restrictive perms.
+    """
+
+    def _open(self):  # type: ignore[override]
+        stream = super()._open()
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except Exception:
+            pass
+        return stream
+
+    def doRollover(self):  # type: ignore[override]
+        # Perform normal rollover (renames current file and reopens stream)
+        super().doRollover()
+        # Enforce perms on the newly created active file
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except Exception:
+            pass
+
+
 def configure_logging() -> str | None:
     """
     Configure root logging from CFG['logging'].
@@ -218,7 +243,8 @@ def configure_logging() -> str | None:
             max_bytes = int(log_cfg.get("rotate_max_bytes", 5_000_000))
             backups = int(log_cfg.get("rotate_backups", 5))
 
-            fh = RotatingFileHandler(str(log_path), maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+            fh = SecureRotatingFileHandler(str(log_path), maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+            os.chmod(log_path, 0o600)
             file_level_name = str(log_cfg.get("file_level", _preset.get("file_level", level_name))).upper()
             fh.setLevel(getattr(logging, file_level_name, level))
             fh.setFormatter(formatter)

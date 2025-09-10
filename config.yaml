@@ -390,6 +390,21 @@ export:
     include_third_pass_raw: false    # set true to embed raw parsedData for each group
     include_rows: true               # flattened rows for each group
 
+analytics:
+  enable: true
+  # Denominator patterns for common-size statements (case-insensitive regex)
+  common_size:
+    denominators:
+      Profit And Loss Statement:
+        - '^\s*revenue\s*from\s*operations\b'
+        - '^\s*total\s*income\b'
+        - '^\s*income\s*from\s*operations\b'
+      Balance Sheet:
+        - '^\s*total\s*assets\b'
+        - '^\s*total\s*equity\s*and\s*liabilit(?:y|ies)\b'
+      Cashflow:
+        - '^\s*revenue\b'
+
 logging:
   # Quick presets: quiet | normal | verbose (acts as defaults; explicit keys win)
   preset: "normal"

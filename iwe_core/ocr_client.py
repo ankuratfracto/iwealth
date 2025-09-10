@@ -148,19 +148,21 @@ def call_fracto(
         return {"file": file_name, "status": "ok", "data": payload}
     except requests.HTTPError as exc:
         code = getattr(exc.response, "status_code", None)
-        body = ""
+        reason = ""
         try:
-            body = (exc.response.text or "")[:300]
+            reason = getattr(exc.response, "reason", "") or ""
         except Exception:
             pass
         if code == 403:
             logger.error(
-                "✗ %s failed: HTTP 403 Forbidden. Verify API key and access to parserApp=%s. Endpoint=%s. Body: %s",
-                file_name, parser_app, endpoint, body
+                "✗ %s failed: HTTP 403 Forbidden. Verify API key and parserApp access. Endpoint=%s. Response body omitted.",
+                file_name, endpoint
             )
+            sanitized_error = "HTTP 403 Forbidden — verify API key and parserApp access"
         else:
-            logger.error("✗ %s failed: HTTP %s. Body: %s", file_name, code, body)
-        return {"file": file_name, "status": "error", "http_status": code, "error": body or str(exc)}
+            logger.error("✗ %s failed: HTTP %s %s. Response body omitted.", file_name, code, reason)
+            sanitized_error = (f"HTTP {code} {reason}".strip() if code is not None else "HTTP error")
+        return {"file": file_name, "status": "error", "http_status": code, "error": sanitized_error}
     except Exception as exc:
         logger.error("✗ %s failed: %s", file_name, exc)
         return {"file": file_name, "status": "error", "error": str(exc)}

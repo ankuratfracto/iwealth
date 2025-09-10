@@ -14,7 +14,8 @@ import logging
 import re
 
 from iwe_core.config import CFG
-from iwe_core.grouping import normalize_doc_type
+from iwe_core.grouping import normalize_doc_type, _canon_text
+from iwe_core import analytics as _analytics
 
 logger = logging.getLogger(__name__)
 
@@ -225,12 +226,9 @@ def doc_type_from_payload(pd_payload: dict | list) -> str | None:
     scope_raw = (gm.get("scope") or mm.get("scope") or "").strip()
     stype_raw = (gm.get("statement_type") or mm.get("statement_type") or "").strip()
 
-    # Normalize helpers
-    def _canon(s: str) -> str:
-        return re.sub(r"\s+", " ", (s or "").strip().lower())
-
-    scope_c = _canon(scope_raw)
-    stype_c = _canon(stype_raw)
+    # Normalize using shared helper
+    scope_c = _canon_text(scope_raw)
+    stype_c = _canon_text(stype_raw)
 
     # Map common statement_type variants to a base doc kind
     base: str | None = None
@@ -396,6 +394,7 @@ def write_statements_json(
         return out
 
     docs: dict[str, dict] = {}
+    analytics_meta: dict[str, dict] = {}
     for doc_type in allowed:
         rows = combined_rows.get(doc_type) or []
         try:
@@ -418,12 +417,48 @@ def write_statements_json(
             entry["rows"] = rows
         docs[doc_type] = entry
 
+        # Analytics foundations (metadata only; no numeric mutation)
+        if bool((CFG.get("analytics", {}) or {}).get("enable", True)):
+            try:
+                # Representative payload (first of third-pass list for this doc)
+                pd_payload = None
+                try:
+                    _raw_list = (third_pass_raw or {}).get(doc_type) or []
+                    if isinstance(_raw_list, list) and _raw_list:
+                        pd_payload = ((_raw_list[0].get("data") or {}).get("parsedData") or {})
+                    elif isinstance(_raw_list, dict):
+                        pd_payload = ((_raw_list.get("data") or {}).get("parsedData") or {})
+                except Exception:
+                    pd_payload = None
+
+                units = _analytics.detect_units_and_currency(pd_payload if isinstance(pd_payload, dict) else {}, rows)
+                # labels: tolerate both string and dict forms
+                try:
+                    labels = {str(k).lower(): (v if isinstance(v, str) else str((v or {}).get("label", ""))) for k, v in (periods_by_doctype.get(doc_type, {}) or {}).items()}
+                except Exception:
+                    labels = {str(k).lower(): str(v) for k, v in (periods_by_doctype.get(doc_type, {}) or {}).items()}
+                period_idx = _analytics.build_period_index(labels)
+                qflags = _analytics.quality_flags(doc_type, rows, labels)
+                footrefs = _analytics.extract_footnote_refs(rows)
+
+                analytics_meta[doc_type] = {
+                    "units": units,
+                    "period_index": period_idx,
+                    "quality": qflags,
+                    "footnotes": footrefs,
+                    "restatements": {},
+                }
+            except Exception:
+                pass
+
     out = {
         "file": Path(pdf_path).name,
         "status": "ok",
         "company_type": company_type or "",
         "documents": docs,
     }
+    if analytics_meta:
+        out["analytics"] = analytics_meta
 
     combined_json_cfg = (CFG.get("export", {}).get("combined_json", {}) or {})
     if combined_json_cfg.get("include_first_pass") and first_pass_results is not None:

@@ -29,13 +29,16 @@ def from_json_to_workbook(out_xlsx: str | None, json_paths: List[str], pdf_hint:
         raise ValueError("Provide at least one *_ocr.json path")
 
     base = Path(json_paths[0]).expanduser().resolve()
+    # Derive a clean stem from first JSON (drop trailing _ocr)
+    stem_base = base.stem.replace('_ocr', '')
     if out_xlsx is None:
-        out_xlsx = str(base.with_name(f"{base.stem.replace('_ocr','')}_statements.xlsx"))
+        out_xlsx = str(base.with_name(f"{stem_base}_statements.xlsx"))
     stub_pdf = pdf_hint or str(base.with_suffix(".pdf"))
 
     import pandas as pd
     combined_sheets: Dict[str, Any] = {}
     periods_by_doc: Dict[str, Dict] = {}
+    third_pass_raw: Dict[str, list] = {}
 
     for jp in json_paths:
         p = Path(jp).expanduser().resolve()
@@ -78,11 +81,40 @@ def from_json_to_workbook(out_xlsx: str | None, json_paths: List[str], pdf_hint:
         except Exception:
             pass
 
+        # Preserve raw payloads to enrich combined JSON (optional)
+        try:
+            third_pass_raw.setdefault(doc_type, []).append(obj)
+        except Exception:
+            pass
+
     if not combined_sheets:
         raise RuntimeError("No sheets built from provided JSONs")
 
-    stem = Path(out_xlsx).stem.replace("_statements", "")
+    # If caller provided an explicit workbook name, prefer its stem for JSON naming
+    if out_xlsx is not None:
+        stem = Path(out_xlsx).stem.replace('_statements', '')
+    else:
+        stem = stem_base
     xlsx_path = _excel._write_statements_workbook(stub_pdf, stem, combined_sheets, routing_used=None, periods_by_doc=periods_by_doc)
+
+    # Also emit a combined statements JSON alongside the workbook
+    try:
+        combined_rows = {k: ([] if (v is None or getattr(v, "empty", False)) else v.to_dict(orient="records")) for k, v in (combined_sheets or {}).items()}
+        json_ops.write_statements_json(
+            stub_pdf,
+            stem,
+            combined_rows,
+            groups=None,
+            routing_used=None,
+            company_type=None,
+            out_path_override=None,
+            first_pass_results=None,
+            second_pass_result=None,
+            third_pass_raw=third_pass_raw,
+        )
+    except Exception:
+        # Keep workbook creation successful even if JSON writing fails
+        pass
 
     # Move/rename to desired out_xlsx if different
     try:
@@ -120,6 +152,14 @@ def run_from_json_argv(argv: List[str]) -> int:
     try:
         final_path = from_json_to_workbook(out_xlsx, jsons, pdf_hint)
         print(f"[from-json] Workbook written → {final_path}")
+        # Also tell user where JSON landed
+        try:
+            base = Path(final_path).expanduser().resolve()
+            json_guess = str(base.with_name(base.stem.replace('_statements','') + '_statements.json'))
+            if Path(json_guess).exists():
+                print(f"[from-json] Combined JSON → {json_guess}")
+        except Exception:
+            pass
         return 0
     except Exception as e:
         print(f"[from-json] Failed: {e}")

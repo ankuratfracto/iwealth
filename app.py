@@ -430,7 +430,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         if not isinstance(item, dict):
             continue
         main_dt = item.get("doc_type") or item.get("Document_type")
-            has_two = is_true_flag(item.get("has_two") or item.get("Has_multiple_sections"))
+        has_two = is_true_flag(item.get("has_two") or item.get("Has_multiple_sections"))
         second_dt = item.get("second_doc_type") or item.get("Second_doc_type")
         norm_class.append({
             "page_number": int(item.get("page_number") or i),
@@ -669,7 +669,8 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         combined_obj = {"documents": {dt: {"pages": groups.get(dt, [])} for dt in groups}}
         (tmpdir / json_name_tmpl.format(stem=stem)).write_text(_json.dumps(combined_obj), encoding="utf-8")
 
-        # Call the shared writer; it returns the xlsx path
+        # Call the shared writer; it returns the path to the full statements workbook.
+        # The writer also emits a client-friendly workbook (no meta columns) alongside it.
         xlsx_out = _write_statements_workbook(
             str(tmp_pdf_path),
             stem,
@@ -677,7 +678,16 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
             routing_used=routing_used,
             periods_by_doc=periods_hint
         )
-        xlsx_bytes = Path(xlsx_out).read_bytes()
+        # Prefer the client-friendly workbook for Streamlit download, if present
+        try:
+            client_tmpl = (CFG.get("export", {}) or {}).get("filenames", {}).get("client_xlsx", "{stem}_client.xlsx")
+            client_path = (tmpdir / client_tmpl.format(stem=stem))
+            if client_path.exists():
+                xlsx_bytes = client_path.read_bytes()
+            else:
+                xlsx_bytes = Path(xlsx_out).read_bytes()
+        except Exception:
+            xlsx_bytes = Path(xlsx_out).read_bytes()
         progress.progress(1.0, text=f"All done in {time.time()-t_overall:.1f}s")
         status_write("✅ Excel ready to download.")
         return xlsx_bytes
@@ -1077,7 +1087,8 @@ if run:
             excel_bytes = buffer.getvalue()
             final_name = f"{base_name}_ocr.xlsx"
         else:
-            _tmpl = CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
+            # We returned the client-friendly workbook above; set its filename accordingly
+            _tmpl = CFG.get("export", {}).get("filenames", {}).get("client_xlsx", "{stem}_client.xlsx")
             final_name = _tmpl.format(stem=base_name)
 
         progress.progress(1.0, text="Done!")
