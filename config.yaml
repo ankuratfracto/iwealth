@@ -10,7 +10,7 @@ api:
   # When enabled, a form field qr_range: "<value>" is sent along with the PDF
   # Example value "0" mirrors curl: --form 'qr_range="0"'
   qr_range:
-    enable: false
+    enable: true
     value: "0"
 
 concurrency:
@@ -41,13 +41,13 @@ passes:
   second:
     parser_app: "pDJoI1nbLM6TvD5u"     # second-pass (selected.pdf) classifier
     model: "gv1"
-    extra_accuracy: false
+    extra_accuracy: true
     save_selected_json: true
     selected_json_name: "{stem}_selected_ocr.json"
     selected_pdf_name:  "{stem}_selected.pdf"
     combine_pages: true
   filter:
-    enable: false                  # turn off to skip quick pruning
+    enable: true                  # turn off to skip quick pruning
     parser_app: "pDJoI1nbLM6TvD5u"   # reuse the classifier; set your nano/light parserApp if different
     model: "tv6"                 # set the tiny model you have (fallbacks to your config if unavailable)
     extra_accuracy: false
@@ -63,9 +63,9 @@ passes:
       - Standalone Cashflow
   third:
     defaults:
-      parser_app: "ft0CicYHxV6UwAfD"   # default if routing has no match
-      model: "tv7"
-      extra_accuracy: true
+      parser_app: "qbE1jBS40EtBRvvx"   # default if routing has no match (generic corporate BS parser)
+      model: "tv6"
+      extra_accuracy: false
     # Retry plan if a group's validation fails
     on_validation_failure:
       retries:
@@ -203,9 +203,22 @@ company_type_prior:                     # soft prior; never a hard gate
 
 routing:                                # per (company_type × doc_type)
   # doc_type keys must be lower-case canonical labels
-  # When true, a disabled parser (enable: false) will cause that doc type to be skipped
+  # When true, a disabled parser (enable: true) will cause that doc type to be skipped
   # instead of falling back to a different parser.
   skip_on_disabled: true
+  non financial company:
+    consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
+    # done
+    standalone balance sheet:               { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
+    # done
+    consolidated profit and loss statement: { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
+    # done
+    standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
+    # done
+    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    # done
+    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    # done
   corporate:
     consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
     # done
@@ -215,9 +228,9 @@ routing:                                # per (company_type × doc_type)
     # done
     standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
     # done
-    consolidated cashflow:                  { parser: "LOKukjCXgxKDFaBF", model: "tv6", extra: true, enable: false }
+    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
     # done
-    standalone cashflow:                    { parser: "LOKukjCXgxKDFaBF", model: "tv6", extra: true, enable: false }
+    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
     # done
   bank:
     consolidated balance sheet:             { parser: "JZRkn5y0kkSmABvy", model: "tv6", extra: true, enable: true }
@@ -228,9 +241,9 @@ routing:                                # per (company_type × doc_type)
     # done
     standalone profit and loss statement:   { parser: "5o14rnboPfr82BG9", model: "tv6", extra: true, enable: true }
     # done
-    consolidated cashflow:                  { parser: "zIPeLWCJmfLlseOb", model: "tv6", extra: true, enable: true }
+    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
     # done
-    standalone cashflow:                    { parser: "o2JM9jlI6E0ortkp", model: "tv6", extra: true, enable: true }
+    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
     # done
   nbfc: {}
   insurance: {}
@@ -294,7 +307,10 @@ validation:
       max_components: 10              # cap for brute-force; keep small if allow_subset=true
       allow_subset: true              # explore +/-/drop combinations (3^N on <= max_components)
     cashflow:
+      enable: true
       enforce_cash_tie: true         # CFO + CFI + CFF ≈ Δ cash; tie to opening/closing
+      tolerance_pct: 0.005
+      abs_min: 1.0
   # Company-type specific validation profiles (regex, case-insensitive)
   profiles:
     corporate:
@@ -364,6 +380,8 @@ export:
   filenames:
     group_pdf:  "{stem}_{slug}.pdf"
     group_json: "{stem}_{slug}_ocr.json"
+    # Explicit first-pass JSON filename (no slug available in first pass)
+    first_pass_json: "{stem}_ocr.json"
     statements_xlsx: "{stem}_statements.xlsx"
   combined_json:
     filename: "{stem}_statements.json"
@@ -373,17 +391,59 @@ export:
     include_rows: true               # flattened rows for each group
 
 logging:
-  level: "INFO"
+  # Quick presets: quiet | normal | verbose (acts as defaults; explicit keys win)
+  preset: "normal"
+  level: "DEBUG"
   json: false
   include_timing: true
+  # Write logs to a rotating file as well as console. Path is relative to repo root.
+  file: "logs/iwealth.log"
+  rotate_max_bytes: 5000000   # 5 MB per file
+  rotate_backups: 50           # keep last 5 files
+  # Console handler controls
+  console: true
+  # console_level: "INFO"      # optional override, defaults to level
+  # File-specific level override (defaults to level)
+  # file_level: "INFO"
+  # Include more context in each log line
+  include_logger_name: true
+  include_module: true
+  include_path: true          # if true, uses full path instead of module
+  include_lineno: true
+  include_process: true
+  include_thread: true
+  # Timestamp options
+  utc: false                   # set true to use UTC timestamps
+  datefmt: "%H:%M:%S"        # used for text logs
+  # Capture Python warnings and prints
+  capture_warnings: true
+  capture_prints: true        # set true to mirror stdout/stderr to logs
+  print_level_out: "INFO"     # level for stdout when captured
+  print_level_err: "ERROR"    # level for stderr when captured
+  # Advanced: if integrating with frameworks that pre-configure logging, avoid forcing reconfigure
+  force_reconfigure: false
+  # Enable library (third-party) logger level controls
+  libs_enable: true
+  # Fine-grained logger controls (tune noise up/down by area)
+  # Example levels here suppress noisy HTTP libs while keeping app DEBUG.
+  loggers:
+    iwe_core: INFO
+    iwe_core.pipeline: INFO
+    iwe_core.excel_ops: INFO
+    iwe_core.ocr_client: INFO
+    stdout: INFO
+    stderr: ERROR
+  libs:
+    urllib3: WARNING
+    requests: WARNING
 
 # Toggle extra debug output without changing environment variables.
 # Env vars still override these at runtime:
 #   IWEALTH_DEBUG_JSON, IWEALTH_DEBUG_VALIDATION
 debug:
-  json_extraction: false      # enables [JSONDBG] logs
+  json_extraction: true      # enables [JSONDBG] logs
   validation: true           # enables [VALDBG] logs
-  periods_dump: false         # writes periods_debug.json artifact next to workbook
+  periods_dump: true         # writes periods_debug.json artifact next to workbook
 
 paths:
   mapping_yaml: "mapping.yaml"       # reuse your existing file

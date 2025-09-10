@@ -1,12 +1,45 @@
-# a.py
+"""Legacy OCR/Excel script (superseded by `iwe_core` pipeline).
+
+Contains CLI helpers and PDF utilities kept for backward compatibility and
+ad‑hoc workflows. New code should prefer the orchestrated entry points in
+`iwe_core.pipeline` and related modules.
+"""
 
 from __future__ import annotations
-# from concurrent.futures import ThreadPoolExecutor, as_completed  # imported locally where needed
 import re
 from pathlib import Path
 import yaml, os
+from typing import Any
 import iwe_core.excel_ops as excel_ops
+from iwe_core import json_ops
 from iwe_core.config import CFG
+from iwe_core.ocr_client import (
+    call_fracto as call_fracto,
+    call_fracto_parallel as call_fracto_parallel,
+    resolve_api_key as _resolve_api_key,
+)
+from iwe_core.selection import (
+    _is_truthy_val,
+    _json_get_first,
+    _json_any_truthy,
+    _schema_paths,
+    _second_pass_container,
+    _second_pass_field,
+)
+from iwe_core.grouping import (
+    _canon_text,
+    extract_page_texts_from_pdf_bytes,
+)
+from iwe_core.utils import (
+    company_type_from_token,
+    is_true_flag,
+    format_ranges,
+)
+from iwe_core.json_ops import doc_type_from_payload as _doc_type_from_payload
+from iwe_core.debug_utils import (
+    dprint,
+    debug_enabled,
+)
 
 # Global cache used by Excel header renaming and diagnostics
 PERIOD_LABELS_BY_DOC: dict[str, dict] = {}
@@ -16,45 +49,9 @@ CHUNK_SIZE_PAGES = int(CFG.get("concurrency", {}).get("chunk_size_pages", 1))
 MAX_PARALLEL     = int(CFG.get("concurrency", {}).get("max_parallel", 9))
 MIN_TAIL_COMBINE = int(CFG.get("concurrency", {}).get("min_tail_combine", 1))
 
-def _split_pdf_bytes(pdf_bytes: bytes,
-                     chunk_size: int = CHUNK_SIZE_PAGES,
-                     min_tail: int = MIN_TAIL_COMBINE) -> list[bytes]:
-    """
-    Return a list of PDF byte-chunks. Keeps fixed-size blocks, except that a final
-    fragment < min_tail pages is merged into the previous chunk to retain context.
-    """
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than 0")
-    if min_tail < 0:
-        raise ValueError("min_tail must be non-negative")
+# Splitting logic is provided by iwe_core.ocr_client; no local copy needed
 
-    from iwe_core.pdf_ops import build_pdf_from_pages, get_page_count_from_bytes
-
-    total = get_page_count_from_bytes(pdf_bytes)
-    if total <= chunk_size:
-        return [pdf_bytes]
-
-    # Compute (start,end) 1-based inclusive ranges with tail-merge
-    ranges: list[tuple[int, int]] = []
-    start = 1
-    while start <= total:
-        end = min(start + chunk_size - 1, total)
-        tail = total - end
-        if tail < min_tail and ranges:
-            ps, pe = ranges[-1]
-            ranges[-1] = (ps, total)
-            break
-        ranges.append((start, end))
-        start = end + 1
-
-    chunks: list[bytes] = []
-    for s, e in ranges:
-        chunks.append(build_pdf_from_pages(pdf_bytes, range(s, e + 1)))
-    return chunks
-
-def call_fracto_parallel(pdf_bytes, file_name, *, extra_accuracy: str = "true") -> list[dict]:
-    from iwe_core.ocr_client import call_fracto_parallel as _core_parallel
-    return _core_parallel(pdf_bytes, file_name, extra_accuracy=extra_accuracy)
+ 
 #!/usr/bin/env python
 """
 fracto_page_ocr.py
@@ -69,279 +66,18 @@ import json
 import time
 import logging
 # from pathlib import Path  # already imported above
-# typing imported later where needed
+ 
 
-from openpyxl.styles import Font, Alignment, PatternFill
+# from openpyxl.styles import Font, Alignment, PatternFill  # no longer used here
 
-from PyPDF2 import PdfReader
 from reportlab.pdfgen import canvas
 
-# ─── PDF Stamping Helper ──────────────────────────────────────────────
+ 
 
-import re as _re
-
-def reorder_dataframe_sections_first(df):
-    """
-    Ensure each section's header row appears before its break-up lines, with totals last.
-
-    A row is considered a *header* if EITHER:
-      • sr_no looks like a top-level number (e.g., 1, 1.0, 1.00, 12.30), OR
-      • it’s a label-only line (non-empty name column, NO numeric amounts), and not a Total/Subtotal.
-
-    Totals/Subtotals are always pushed to the end of their section.
-    """
-    # Proceed without importing pandas; operate on duck-typed DataFrame
-    if df is None or getattr(df, "empty", True):
-        return df
-
-    cols = list(df.columns)
-
-    # 1) Identify the "name" / particulars column (case-insensitive)
-    name_col = None
-    for c in cols:
-        if str(c).strip().lower() in {
-            "particulars", "description", "item", "line_item", "account", "head", "details"
-        }:
-            name_col = c
-            break
-    if name_col is None:
-        return df  # no safe way to reorder
-
-    # 2) Numeric columns (c1..cN or columns containing 'amount'/'value')
-    num_cols = [c for c in cols if _re.fullmatch(r'(?i)c\d+', str(c))
-                or ("amount" in str(c).lower())
-                or ("value" in str(c).lower())]
-    if not num_cols:
-        meta = {name_col, "sr_no", "srno", "serial", "note"}
-        num_cols = [c for c in cols if str(c).lower() not in {m.lower() for m in meta}]
-
-    def _is_numlike(v):
-        if v is None:
-            return False
-        if isinstance(v, str) and v.strip() in {"", "-", "–", "—", "na", "n/a", "nil"}:
-            return False
-        try:
-            float(str(v).replace(",", ""))
-            return True
-        except Exception:
-            return False
-
-    n = len(df)
-    is_header = [False]*n
-    is_total  = [False]*n
-
-    # Accept many variants of the serial column (regex) and provide a fallback
-    def _norm(s: str) -> str:
-        return str(s or "").strip().lower()
-
-    sr_cols = []
-    for c in cols:
-        nm = _norm(c)
-        if _re.search(r'^(sr\.?\s*no\.?|s\.?\s*no\.?|serial(?:\s*no)?)$', nm):
-            sr_cols.append(c)
-        elif nm in {"sr_no","srno","serial","serial no","serial_no","s no","s. no.","sno","s.no","sr. no.","sr no"}:
-            sr_cols.append(c)
-    sr_col = sr_cols[0] if sr_cols else None
-
-    # Fallback: if no explicit sr_no column, try using the left-most column if many values look like 1, 1.0, 1.00, 12.30
-    if sr_col is None and len(cols) > 0:
-        first_col = cols[0]
-        try:
-            series = df[first_col].dropna().astype(str).str.strip()
-            frac = (series.str.fullmatch(r'\d+(?:\.\d+)?').sum()) / max(len(series), 1)
-            if frac >= 0.25:  # at least 25% look like serials → treat as sr_no
-                sr_col = first_col
-        except Exception:
-            pass
-
-    def cell(i, c):
-        try:
-            return df.iloc[i][c]
-        except Exception:
-            return None
-
-    for i in range(n):
-        name = str(cell(i, name_col) or "").strip()
-        tot = bool(_re.match(r'^\s*(total|subtotal|grand\s+total)\b', name.lower()))
-        is_total[i] = tot
-
-        # Any numeric value in amount columns?
-        num_present = any(_is_numlike(cell(i, c)) for c in num_cols)
-
-        # Header detection:
-        #  (a) numeric-style sr_no (1, 1.0, 1.00, 12.30) → header (even if numbers present)
-        #  (b) non-empty name with NO numbers and not a total → header
-        sr_val = (str(cell(i, sr_col)).strip() if sr_col else "")
-        header_by_sr = bool(_re.fullmatch(r'\d+(?:\.\d+)?', sr_val))
-        header_by_name_no_num = (name != "") and (not num_present) and (not tot)
-
-        is_header[i] = header_by_sr or header_by_name_no_num
-
-    out_idx, used = [], [False]*n
-
-    def append_details(start, end):
-        if start > end:
-            return
-        block = [j for j in range(start, end+1) if not is_header[j] and not used[j]]
-        non_tot = [j for j in block if not is_total[j]]
-        tots    = [j for j in block if is_total[j]]
-        for j in non_tot + tots:
-            out_idx.append(j); used[j] = True
-
-    i = 0
-    while i < n:
-        if used[i]:
-            i += 1; continue
-        if is_header[i]:
-            out_idx.append(i); used[i] = True
-            j = i + 1
-            while j < n and not is_header[j]:
-                j += 1
-            append_details(i+1, j-1)
-            i = j
-        else:
-            # break-up rows before a header → bring the next header forward, then its details
-            k = i
-            while k < n and not is_header[k]:
-                k += 1
-            if k < n:
-                out_idx.append(k); used[k] = True
-                append_details(i, k-1)
-                j = k + 1
-                while j < n and not is_header[j]:
-                    j += 1
-                append_details(k+1, j-1)
-                i = j
-            else:
-                append_details(i, n-1)
-                i = n
-
-    # Optional debug: set FRACTO_DEBUG_ORDER=1 to see header/total counts and a small preview
-    import os as _os
-    if _os.getenv("FRACTO_DEBUG_ORDER") == "1":
-        try:
-            preview_cols = [name_col]
-            if sr_col and sr_col != name_col:
-                preview_cols = [sr_col] + preview_cols
-            print("[ORDERDBG] headers=", sum(is_header), "totals=", sum(is_total), flush=True)
-            print("[ORDERDBG] preview (pre):", df[preview_cols].head(12).to_dict("records"), flush=True)
-        except Exception:
-            pass
-
-    try:
-        df_out = df.iloc[out_idx].reset_index(drop=True)
-        import os as _os
-        if _os.getenv("FRACTO_DEBUG_ORDER") == "1":
-            try:
-                preview_cols = [name_col]
-                if sr_col and sr_col != name_col:
-                    preview_cols = [sr_col] + preview_cols
-                print("[ORDERDBG] preview (post):", df_out[preview_cols].head(12).to_dict("records"), flush=True)
-            except Exception:
-                pass
-        return df_out
-    except Exception:
-        return df
+# DataFrame reordering and sanitization now handled in excel_ops normalization
 
 
-# --- Patch: ensure reorder is applied before any DataFrame leaves sanitization
-
-# Try to patch sanitize_statement_df to reorder before every return
-import inspect
-
-def _patch_sanitize_statement_df():
-    # no local-only imports needed here
-    global_vars = globals()
-    # Find the function
-    fn = global_vars.get("sanitize_statement_df")
-    if fn is None:
-        # Try to find in __main__ or other imports
-        try:
-            import __main__
-            fn = getattr(__main__, "sanitize_statement_df", None)
-        except Exception:
-            fn = None
-    if fn is None:
-        return  # nothing to patch
-    src = inspect.getsource(fn)
-    lines = src.splitlines()
-    new_lines = []
-    for line in lines:
-        if line.strip().startswith("return df"):
-            indent = line[:line.find('return')]
-            new_lines.append(f"{indent}df = reorder_dataframe_sections_first(df)")
-            new_lines.append(line)
-        else:
-            new_lines.append(line)
-    # Compile new function
-    src_new = "\n".join(new_lines)
-    # Prepare globals for exec
-    g = fn.__globals__.copy()
-    g["reorder_dataframe_sections_first"] = reorder_dataframe_sections_first
-    # Note: exec in the right context
-    exec(src_new, g)
-    global_vars["sanitize_statement_df"] = g[fn.__name__]
-
-import os as _os
-if _os.getenv("IWEALTH_ENABLE_RUNTIME_PATCHES") == "1":
-    try:
-        _patch_sanitize_statement_df()
-    except Exception:
-        pass
-
-# --- Patch: Excel-writing functions (sanitize_statement_df → reorder_dataframe_sections_first)
-def _patch_excel_writers():
-    import inspect
-    global_vars = globals()
-    # Find all functions that look like Excel writers
-    for name, fn in list(global_vars.items()):
-        if not callable(fn) or not inspect.isfunction(fn):
-            continue
-        src = None
-        try:
-            src = inspect.getsource(fn)
-        except Exception:
-            continue
-        if "to_excel" not in src and "save_workbook" not in src and "write" not in name:
-            continue
-        # Look for calls to sanitize_statement_df
-        pat = re.compile(r"(df_[a-zA-Z0-9_]*\s*=\s*)?sanitize_statement_df\(([^)]+)\)")
-        matches = list(pat.finditer(src))
-        if not matches:
-            continue
-        # Patch after each call
-        lines = src.splitlines()
-        new_lines = []
-        for idx, line in enumerate(lines):
-            new_lines.append(line)
-            m = pat.search(line)
-            if m:
-                # Figure out the variable assigned, if any
-                assign = m.group(1)
-                varname = None
-                if assign:
-                    varname = assign.split("=")[0].strip()
-                else:
-                    # try to extract from inside call, e.g. return sanitize_statement_df(...) → can't patch
-                    continue
-                indent = line[:line.find(m.group(0))]
-                # Insert reorder after sanitize_statement_df
-                new_lines.append(f"{indent}{varname} = reorder_dataframe_sections_first({varname})")
-        # Compile new function
-        src_new = "\n".join(new_lines)
-        g = fn.__globals__.copy()
-        g["reorder_dataframe_sections_first"] = reorder_dataframe_sections_first
-        try:
-            exec(src_new, g)
-            global_vars[name] = g[fn.__name__]
-        except Exception:
-            pass
-
-if _os.getenv("IWEALTH_ENABLE_RUNTIME_PATCHES") == "1":
-    try:
-        _patch_excel_writers()
-    except Exception:
-        pass
+"""Runtime patch helpers removed. Use excel_ops normalization for DF sanitization."""
 
 
 def stamp_job_number(src_bytes: bytes, job_no: str, margin: int = 20) -> bytes:
@@ -430,18 +166,7 @@ THIRD_COMBINE_PAGES  = bool(CFG.get("passes", {}).get("third",  {}).get("combine
 API_KEY_CFG     = CFG.get("api", {}).get("api_key", "")
 API_TIMEOUT_SEC = int(CFG.get("api", {}).get("timeout_seconds", 600))
 
-def _resolve_api_key() -> str:
-    """
-    Resolve API key in this order:
-    1) Env var indicated by api.api_key_env
-    2) config.yaml's api.api_key (useful for local dev)
-    """
-    key = os.getenv(API_KEY_ENV, "")
-    if key:
-        return key
-    if API_KEY_CFG:
-        return str(API_KEY_CFG)
-    return ""
+# Use iwe_core.ocr_client.resolve_api_key
 
 # Selection (first pass → second pass)
 SELECTION_USE_HAS_TABLE     = bool(CFG.get("passes", {}).get("first", {}).get("selection", {}).get("use_has_table", True))
@@ -466,73 +191,6 @@ _ROUTING_SKIP_ON_DISABLED = bool(_ROUTING_CFG.get("skip_on_disabled", False))
 
 # ─── Generic JSON access & criteria helpers (config‑driven) ─────────────
 TRUTHY_SET = {str(x).strip().lower() for x in (CFG.get("truthy_values") or ["true","1","yes","y","on"])}
-
-def _is_truthy_val(v) -> bool:
-    if isinstance(v, bool):
-        return v
-    if v is None:
-        return False
-    s = str(v).strip().lower()
-    if s in TRUTHY_SET:
-        return True
-    try:
-        return float(s) != 0.0
-    except Exception:
-        return False
-
-def _json_get_first(obj, path: str):
-    """
-    Resolve a dotted path like 'parsedData.has_table'. If a list is encountered
-    and the next step isn't a numeric index, scan elements and return the first
-    successful lookup. Returns None if not found.
-    """
-    cur = obj
-    for step in (path or "").split("."):
-        if isinstance(cur, dict):
-            if step in cur:
-                cur = cur[step]
-            else:
-                return None
-        elif isinstance(cur, list):
-            if step.isdigit():
-                idx = int(step)
-                if 0 <= idx < len(cur):
-                    cur = cur[idx]
-                else:
-                    return None
-            else:
-                # scan list elements
-                found = None
-                for el in cur:
-                    if isinstance(el, dict) and step in el:
-                        found = el[step]
-                        break
-                if found is None:
-                    return None
-                cur = found
-        else:
-            return None
-    return cur
-
-def _json_any_truthy(obj, paths: list[str]) -> bool:
-    for p in (paths or []):
-        val = _json_get_first(obj, p)
-        if isinstance(val, list):
-            if any(_is_truthy_val(x) for x in val):
-                return True
-        else:
-            if _is_truthy_val(val):
-                return True
-    return False
-
-def _schema_paths(alias: str) -> list[str]:
-    """Lookup a schema alias like 'first_pass.has_table' into a list of paths."""
-    node = CFG.get("schema", {})
-    for key in (alias or "").split("."):
-        if not isinstance(node, dict) or key not in node:
-            return []
-        node = node[key]
-    return list(node) if isinstance(node, list) else ([] if node is None else [str(node)])
 
 def _select_by_criteria(res: dict) -> bool:
     """Evaluate passes.first.selection.criteria over a single first-pass result."""
@@ -638,33 +296,44 @@ def _first_pass_has_table(res: dict) -> bool:
         return False
     return _is_truthy_val(pdict.get(field))
 
-def _second_pass_container(pd_payload: dict | list) -> list:
-    """Return the list of classification rows based on config container paths."""
-    if isinstance(pd_payload, list):
-        return pd_payload
-    paths = (CFG.get("schema", {}).get("second_pass", {}) or {}).get("classification_container") or []
-    for p in paths:
-        lst = _json_get_first(pd_payload, p)
-        if isinstance(lst, list):
-            return lst
-    return []
-
-def _second_pass_field(item: dict, field_name: str, default=None):
-    paths = (CFG.get("schema", {}).get("second_pass", {}).get("fields", {}) or {}).get(field_name) or []
-    for p in paths:
-        v = _json_get_first(item, p) if "." in p else item.get(p)
-        if v is not None and v != "":
-            return v
-    return default
+"""
+Importing _second_pass_container and _second_pass_field from iwe_core.selection.
+"""
 
 def _second_pass_org_type(pd_payload: dict | list):
+    """Extract organisation_type.type from second-pass payload.
+    Priority:
+      1) Configured schema paths under CFG['schema']['second_pass']['organisation_type']
+      2) Sensible fallbacks on common shapes: payload['organisation_type']['type'] etc.
+    """
     if isinstance(pd_payload, list):
         return None
+    # 1) Config-driven lookup (if provided)
     paths = (CFG.get("schema", {}).get("second_pass", {}) or {}).get("organisation_type") or []
     for p in paths:
         v = _json_get_first(pd_payload, p)
         if v:
+            try:
+                logger.debug("[routing] organisation_type found via schema path '%s': %r", p, v)
+            except Exception:
+                pass
             return v
+    # 2) Fallbacks for common keys
+    try:
+        direct = (((pd_payload or {}).get("organisation_type") or {}).get("type"))
+        if direct:
+            logger.debug("[routing] organisation_type found via default path 'organisation_type.type': %r", direct)
+            return direct
+    except Exception:
+        pass
+    try:
+        alt = (((pd_payload or {}).get("organization_type") or {}).get("type"))
+        if alt:
+            logger.debug("[routing] organisation_type found via fallback path 'organization_type.type': %r", alt)
+            return alt
+    except Exception:
+        pass
+    logger.debug("[routing] organisation_type not found; will fall back to default company_type")
     return None
 
 def _resolve_routing(doc_type: str, company_type: str | None = None) -> tuple[str, str, str]:
@@ -675,6 +344,14 @@ def _resolve_routing(doc_type: str, company_type: str | None = None) -> tuple[st
     dt = (doc_type or "").strip().lower()
     ct = (company_type or _ROUTING_COMPANY_DEFAULT or "corporate").strip().lower()
 
+    # Show available keys for visibility
+    try:
+        _keys_ct = sorted(list((_ROUTING_CFG.get(ct) or {}).keys())) if isinstance(_ROUTING_CFG.get(ct), dict) else []
+        _keys_corporate = sorted(list((_ROUTING_CFG.get("corporate") or {}).keys())) if isinstance(_ROUTING_CFG.get("corporate"), dict) else []
+        logger.info("[routing] available doc_type keys → ct=%s: %s | corporate: %s", ct, _keys_ct, _keys_corporate)
+    except Exception:
+        pass
+
     def _lookup(ct_key: str, dt_key: str):
         ct_map = _ROUTING_CFG.get(ct_key, {})
         if isinstance(ct_map, dict):
@@ -684,6 +361,10 @@ def _resolve_routing(doc_type: str, company_type: str | None = None) -> tuple[st
                 if str(hit.get("enable", True)).strip().lower() in {"false","0","no","off"}:
                     # Respect skip-on-disabled semantics if enabled
                     if _ROUTING_SKIP_ON_DISABLED:
+                        try:
+                            logger.info("[routing] %s/%s is disabled and skip_on_disabled=true → skipping", ct_key, dt_key)
+                        except Exception:
+                            pass
                         return (None, None, None)
                     return None
                 parser = hit.get("parser") or THIRD_PARSER_APP_ID
@@ -691,13 +372,29 @@ def _resolve_routing(doc_type: str, company_type: str | None = None) -> tuple[st
                 extra  = str(hit.get("extra", EXTRA_ACCURACY_THIRD)).lower()
                 # Global allow/block lists
                 if _ROUTING_ALLOWED_PARSERS and parser not in _ROUTING_ALLOWED_PARSERS:
+                    try:
+                        logger.info("[routing] parser %s not in allowed_parsers; falling back", parser)
+                    except Exception:
+                        pass
                     return None
                 if parser in _ROUTING_BLOCKED_PARSERS:
+                    try:
+                        logger.info("[routing] parser %s is blocked; falling back", parser)
+                    except Exception:
+                        pass
                     return None
+                try:
+                    logger.info("[routing] matched %s/%s → parser=%s, model=%s, extra=%s", ct_key, dt_key, parser, model, extra)
+                except Exception:
+                    pass
                 return (parser, model, extra)
         return None
 
     for mode in _ROUTING_FALLBACK_ORDER:
+        try:
+            logger.info("[routing] attempt=%s ct=%s dt=%s", mode, ct, dt)
+        except Exception:
+            pass
         if mode == "company_type_and_doc_type":
             r = _lookup(ct, dt)
             if r == (None, None, None):
@@ -708,16 +405,24 @@ def _resolve_routing(doc_type: str, company_type: str | None = None) -> tuple[st
             r = _lookup("corporate", dt)
             if r: return r
         elif mode == "third_defaults":
+            try:
+                logger.info("[routing] no route; using third_defaults → parser=%s, model=%s, extra=%s", THIRD_PARSER_APP_ID, THIRD_MODEL_ID, EXTRA_ACCURACY_THIRD)
+            except Exception:
+                pass
             return (THIRD_PARSER_APP_ID, THIRD_MODEL_ID, EXTRA_ACCURACY_THIRD)
 
+    try:
+        logger.info("[routing] exhausted fallbacks; using third_defaults → parser=%s, model=%s, extra=%s", THIRD_PARSER_APP_ID, THIRD_MODEL_ID, EXTRA_ACCURACY_THIRD)
+    except Exception:
+        pass
     return (THIRD_PARSER_APP_ID, THIRD_MODEL_ID, EXTRA_ACCURACY_THIRD)
 
 
 # ─── Doc-type normalisation & page-text heuristics ────────────────────────
 
-def _canon_text(s: str) -> str:
-    """Lowercase + collapse whitespace for robust matching."""
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
+"""
+Using grouping._canon_text for canonical text normalisation.
+"""
 
 _DOC_NORMALISATIONS: list[tuple[str, str]] = [
     # Balance Sheet
@@ -749,21 +454,8 @@ def normalize_company_type(ct_raw: str | None) -> str:
 
     # Split by common separators and evaluate tokens left→right
     tokens = [t.strip() for t in re.split(r"[|/,;]+", s) if t.strip()]
-
-    def _classify(token: str) -> str | None:
-        # Avoid misreading "non banking ..." as "bank"
-        if "nbfc" in token or "non banking financial" in token or "non-banking financial" in token:
-            return "nbfc"
-        if "insur" in token:
-            return "insurance"
-        if "bank" in token and "non banking" not in token and "non-banking" not in token:
-            return "bank"
-        if "non financial" in token or "corporate" in token or "company" in token:
-            return "corporate"
-        return None
-
     for tok in tokens:
-        cls = _classify(tok)
+        cls = company_type_from_token(tok)
         if cls:
             return cls
 
@@ -788,20 +480,9 @@ def normalize_doc_type(label: str | None) -> str:
             return out
     return (label or "Others").strip().title()
 
-def extract_page_texts_from_pdf_bytes(pdf_bytes: bytes) -> list[str]:
-    """Return plain text per page using PyPDF2's extract_text (best-effort)."""
-    texts: list[str] = []
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        for p in reader.pages:
-            try:
-                t = p.extract_text() or ""
-            except Exception:
-                t = ""
-            texts.append(t)
-    except Exception:
-        pass
-    return texts
+"""
+Using grouping.extract_page_texts_from_pdf_bytes for PDF text extraction.
+"""
 
 def infer_doc_type_from_text(text: str) -> str | None:
     """
@@ -865,7 +546,7 @@ def build_groups(
     for item in classification or []:
         sel_no = item.get("page_number")
         # If this row is a continuation, prefer the parent's label.
-        is_cont = str(item.get("is_continuation", "")).lower() == "true"
+        is_cont = is_true_flag(item.get("is_continuation"))
         dt_raw = (item.get("continuation_of") if is_cont else None) or item.get("doc_type")
         dt = normalize_doc_type(dt_raw)
         if isinstance(sel_no, int) and 1 <= sel_no <= len(selected_pages):
@@ -883,7 +564,7 @@ def build_groups(
     if inherit_on_cont:
         for item in classification or []:
             sel_no = item.get("page_number")
-            is_cont = str(item.get("is_continuation", "")).lower() == "true"
+            is_cont = is_true_flag(item.get("is_continuation"))
             if not is_cont or not isinstance(sel_no, int):
                 continue
             if 1 <= sel_no <= len(selected_pages):
@@ -893,14 +574,12 @@ def build_groups(
                 continue
 
     # Track which original pages were flagged as 'has_two' (mixed page)
-    def _is_true(x): 
-        return str(x).strip().lower() in ("true","1","yes","y","on")
     has_two_orig_pages: set[int] = set()
     for item in classification or []:
         sel_no = item.get("page_number")
         if not isinstance(sel_no, int):
             continue
-        has_two_flag = _is_true(item.get("has_two") or item.get("Has_multiple_sections") or "")
+        has_two_flag = is_true_flag(item.get("has_two") or item.get("Has_multiple_sections") or "")
         if not has_two_flag:
             continue
         if 1 <= sel_no <= len(selected_pages):
@@ -1027,142 +706,13 @@ def build_groups(
 
     return groups
 
-from typing import Any, List, Dict
 
-def _debug_flag_from_cfg(env_name: str, cfg_key: str, default: bool = False) -> bool:
-    """Env overrides config. Config flag under CFG['debug'][cfg_key]."""
-    try:
-        env = os.getenv(env_name)
-        if env is not None:
-            s = str(env).strip().lower()
-            return s in {"1","true","yes","y","on"}
-        dbg = (CFG.get("debug", {}) or {}).get(cfg_key)
-        # Use existing truthy parser
-        return _is_truthy_val(dbg) if dbg is not None else bool(default)
-    except Exception:
-        return bool(default)
 
-def _debug_enabled() -> bool:
-    return _debug_flag_from_cfg("IWEALTH_DEBUG_JSON", "json_extraction", False)
+# (central debug helpers imported above)
 
-def _dprint(*args, **kwargs):
-    if _debug_enabled():
-        try:
-            print("[JSONDBG]", *args, **kwargs, flush=True)
-        except Exception:
-            pass
+"""Row extraction moved to iwe_core.json_ops.extract_rows."""
 
-def _valdbg_enabled() -> bool:
-    return _debug_flag_from_cfg("IWEALTH_DEBUG_VALIDATION", "validation", False)
-
-def _vprint(*args, **kwargs):
-    if _valdbg_enabled():
-        try:
-            print("[VALDBG]", *args, **kwargs, flush=True)
-        except Exception:
-            pass
-
-def _extract_rows(parsed: Any, doc_type: str | None = None) -> List[Dict[str, Any]]:
-    """
-    Flatten Fracto parsedData into a simple list of row dicts.
-
-    Supports shapes like:
-      • dict-of-dicts-of-lists (e.g., Balance Sheet sections with c1..c4)
-      • dict with 'breakup' sub-rows (e.g., Cashflow)
-      • list of rows (already flat)
-    Skips meta/report scaffolding keys.
-    """
-    rows: List[Dict[str, Any]] = []
-    current_section: str = ""
-
-    def _add_row(d: Dict[str, Any]) -> None:
-        if not isinstance(d, dict):
-            return
-        kset = {str(k).strip().lower() for k in d.keys()}
-        has_any_c = any(re.fullmatch(r"c\d+", k) for k in kset)
-        is_data_row = ("particulars" in kset) or (("sr_no" in kset) and has_any_c)
-        if not is_data_row:
-            return
-
-        row: Dict[str, Any] = {}
-        # Preserve structural hints if present
-        for meta_key in ("id", "row_type", "parent_id", "components"):
-            if meta_key in d:
-                row[meta_key] = d.get(meta_key)
-        # Prefer explicit section_id if provided; else use derived current_section
-        try:
-            _sec = d.get("section_id") or d.get("sectionId")
-        except Exception:
-            _sec = None
-        if _sec:
-            row["section"] = _sec
-        elif current_section:
-            row["section"] = current_section
-        # Keep sr_no if present
-        for cand in ("sr_no", "Sr_no", "srNo", "SrNo"):
-            if cand in d:
-                row["sr_no"] = d.get(cand)
-                break
-
-        # Unify particulars -> "Particulars"
-        part = (
-            d.get("particulars")
-            or d.get("Particulars")
-            or d.get("description")
-            or d.get("Description")
-            or d.get("head")
-            or d.get("Head")
-            or ""
-        )
-        row["Particulars"] = part
-
-        # Copy numeric columns c1..cN dynamically (case-insensitive)
-        for ck in sorted(
-            [k for k in d.keys() if re.match(r"^[cC]\d+$", str(k))],
-            key=lambda x: int(re.findall(r"\d+", str(x))[0])
-        ):
-            row[str(ck).lower()] = d.get(ck)
-
-        rows.append(row)
-        # Debug spotlight for common problem lines
-        try:
-            p = str(row.get("Particulars", "")).strip().lower()
-            if _debug_enabled() and any(key in p for key in ["other assets","total current assets","equity attributable"]):
-                _dprint("extract_rows: row", {k: row.get(k) for k in ("Particulars","c1","c2","c3","c4")})
-        except Exception:
-            pass
-
-    def _walk(x: Any, ancestors: list[str] | None = None) -> None:
-        nonlocal current_section
-        if ancestors is None:
-            ancestors = []
-        if isinstance(x, dict):
-            # Header-first: add this node as a potential row *before* visiting children.
-            _add_row(x)
-            for k, v in x.items():
-                if k in {"meta", "statement_type", "framework", "scope", "report"}:
-                    continue
-                if isinstance(v, (dict, list)):
-                    prev = current_section
-                    # if descending into a list field under ASSETS or EQUITY_AND_LIABILITIES, set section hint
-                    if isinstance(v, list):
-                        top = ancestors[-1] if ancestors else None
-                        if top in {"ASSETS", "EQUITY_AND_LIABILITIES"}:
-                            current_section = f"{top}:{k}"
-                        elif not top and k in {"ASSETS", "EQUITY_AND_LIABILITIES"}:
-                            current_section = k
-                    _walk(v, ancestors + [k])
-                    current_section = prev
-        elif isinstance(x, list):
-            for it in x:
-                _walk(it, ancestors)
-        else:
-            return
-
-    _walk(parsed, [])
-    return rows
-
-def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
+def sanitize_statement_df(doc_type: str, df: Any) -> Any:
     """
     Light-weight cleanups to match human expectations:
       • Merge '(Not annualised)' style notes into the 'particulars' text instead of a separate column.
@@ -1254,12 +804,7 @@ def sanitize_statement_df(doc_type: str, df: "pd.DataFrame") -> "pd.DataFrame":
         # never fail on ordering
         pass
     # Preserve LLM order by default; caller can enable reorder via env
-    try:
-        import os as _os
-        if str(_os.getenv("IWEALTH_ENABLE_REORDER", "0")).strip() in {"1", "true", "yes"}:
-            out = reorder_dataframe_sections_first(out)
-    except Exception:
-        pass
+    # Reordering handled by downstream excel normalization when needed
     return out
 
 def _extract_period_maps_from_payload(pd_payload: dict | list) -> tuple[dict[str, dict], dict[str, str]]:
@@ -1333,19 +878,9 @@ def _labels_only(periods_by_doc: dict[str, dict] | None) -> dict[str, dict]:
     return out
 
 # --- Insert: doc type and period discovery helpers ---
-def _doc_type_from_payload(pd_payload: dict | list) -> str | None:
-    """
-    Best‑effort canonical doc‑type from a parsedData payload using either
-    general_metadata or meta blocks. Falls back to None.
-    """
-    if not isinstance(pd_payload, dict):
-        return None
-    gm = (pd_payload.get("general_metadata") or {}) if isinstance(pd_payload.get("general_metadata"), dict) else {}
-    mm = (pd_payload.get("meta") or {}) if isinstance(pd_payload.get("meta"), dict) else {}
-    scope = (gm.get("scope") or mm.get("scope") or "").strip()
-    stype = (gm.get("statement_type") or mm.get("statement_type") or "").strip()
-    label = f"{scope} {stype}".strip() if stype else stype
-    return normalize_doc_type(label) if label else None
+"""
+Using iwe_core.json_ops.doc_type_from_payload via local alias _doc_type_from_payload.
+"""
 
 def _scan_group_jsons_for_periods(pdf_path: str, stem: str) -> tuple[dict[str, dict], dict[str, dict]]:
     """
@@ -1506,195 +1041,21 @@ def _coerce_number_like(x):
 
 
 
-def _write_statements_json(
-    pdf_path: str,
-    stem: str,
-    combined_rows: dict[str, list[dict]],
-    groups: dict[str, list[int]] | None,
-    routing_used: dict[str, dict] | None,
-    company_type: str | None,
-    out_path_override: str | None = None,
-    first_pass_results: list[dict] | None = None,
-    second_pass_result: dict | None = None,
-    third_pass_raw: dict[str, list[dict]] | None = None,
-) -> str:
-    """
-    Write a single combined JSON containing only:
-      - Consolidated/Standalone Balance Sheet
-      - Consolidated/Standalone Profit and Loss Statement
-      - Consolidated/Standalone Cashflow
-    Structure:
-    {
-      "file": "<original.pdf>",
-      "status": "ok",
-      "company_type": "bank|nbfc|insurance|corporate",
-      "documents": {
-         "<Canonical Doc Type>": {
-            "rows": [ {...}, ... ],
-            "pages": [10, 11],
-            "parser_app": "...",
-            "model": "tv7",
-            "extra_accuracy": true
-         },
-         ...
-      }
-    }
-    """
-
-    # Collect period maps per document type from third-pass raw payloads (if available)
-    periods_by_doctype: dict[str, dict] = {}
-    _labels_for_excel: dict[str, dict] = {}
-    try:
-        if third_pass_raw:
-            # Expected shape: {doc_type -> [ {"data": {"parsedData": {...}}}, ... ]}
-            for _dt_key, _res_list in (third_pass_raw or {}).items():
-                dt_norm = normalize_doc_type(_dt_key)
-                candidates = _res_list if isinstance(_res_list, list) else [_res_list]
-                for _res in candidates:
-                    if not isinstance(_res, dict):
-                        continue
-                    pd_payload = ((_res.get("data") or {}).get("parsedData") or {})
-                    by_id, labels = _extract_period_maps_from_payload(pd_payload)
-                    if by_id:
-                        periods_by_doctype[dt_norm] = by_id
-                        _labels_for_excel[dt_norm] = {k.lower(): v for k, v in labels.items()}
-                        break
-        # Expose labels for Excel header renaming
-        if _labels_for_excel:
-            #global PERIOD_LABELS_BY_DOC
-            for _k, _v in _labels_for_excel.items():
-                PERIOD_LABELS_BY_DOC[_k] = _v
-    except Exception:
-        # Never fail JSON export due to period extraction issues
-        pass
-
-    # Fallback: also scan any saved group JSONs on disk to enrich periods & labels
-    try:
-        _by_doc, _labels = _scan_group_jsons_for_periods(pdf_path, stem)
-        if _by_doc:
-            for _k, _v in _by_doc.items():
-                periods_by_doctype.setdefault(_k, {}).update(_v)
-        if _labels:
-            # global PERIOD_LABELS_BY_DOC
-            for _k, _v in _labels.items():
-                PERIOD_LABELS_BY_DOC.setdefault(_k, {}).update(_v)
-    except Exception:
-        # Don't fail if group JSONs are missing or unreadable
-        pass
 
 
-    allowed = [lbl for lbl in (CFG.get("labels", {}).get("canonical", []) or []) if lbl != "Others"]
+from iwe_core.config import configure_logging as _configure_logging
 
-    def _coerce_row_numbers(row: dict) -> dict:
-        """Coerce any cN/pN values in a shallow row dict to numbers when possible.
-        Preserves empty strings as empty, and non-parsable values as-is.
-        """
-        out = dict(row)
-        try:
-            import re as _re
-            for k in list(out.keys()):
-                if _re.fullmatch(r"(?i)[cp]\d+", str(k)):
-                    v = out[k]
-                    nv = _coerce_number_like(v)
-                    # Keep original if completely empty; otherwise use numeric or None
-                    if v in ("", None):
-                        continue
-                    out[k] = nv if nv is not None else out[k]
-        except Exception:
-            pass
-        return out
-    docs: dict[str, dict] = {}
-    for doc_type in allowed:
-        rows = combined_rows.get(doc_type) or []
-        if _debug_enabled():
-            try:
-                _dprint(f"pre-coerce rows for {doc_type}: {len(rows)}")
-                _oa0 = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="other assets"]
-                if _oa0:
-                    _dprint("pre-coerce 'Other assets':", _oa0[:1])
-            except Exception:
-                pass
-        # Coerce numeric-like strings to numbers so JSON is consistent and Excel sums are robust downstream
-        try:
-            rows = [_coerce_row_numbers(r) for r in rows]
-        except Exception:
-            pass
-        if _debug_enabled():
-            try:
-                _oa1 = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="other assets"]
-                if _oa1:
-                    _dprint("post-coerce 'Other assets':", _oa1[:1])
-            except Exception:
-                pass
-        if not rows:
-            continue
-        meta = (routing_used or {}).get(doc_type, {}) if routing_used else {}
-        page_list = (groups or {}).get(doc_type, []) if groups else []
-        entry = {
-            "pages": page_list,
-            "parser_app": meta.get("parser_app", ""),
-            "model": meta.get("model", ""),
-            "extra_accuracy": meta.get("extra", ""),
-            "periods": periods_by_doctype.get(doc_type, {}),
-        }
-        include_rows = bool((CFG.get("export", {}).get("combined_json", {}) or {}).get("include_rows", True))
-        if include_rows:
-            if _debug_enabled():
-                try:
-                    oa = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="other assets"]
-                    tca = [r for r in rows if str(r.get("Particulars","" )).strip().lower()=="total current assets"]
-                    _dprint(f"statements.json rows for {doc_type}: {len(rows)} | other_assets={oa[:1]} | total_current_assets={tca[:1]}")
-                except Exception:
-                    pass
-            entry["rows"] = rows
-        docs[doc_type] = entry
-
-    out = {
-        "file": Path(pdf_path).name,
-        "status": "ok",
-        "company_type": company_type or "",
-        "documents": docs,
-    }
-    try:
-        _dbg_docs = {k: sorted((v or {}).get("periods", {}).keys()) for k, v in (docs or {}).items()}
-        logger.info("Combined JSON: periods per doc → %s", _dbg_docs)
-    except Exception:
-        pass
-
-    # Optionally include additional sections based on config flags
-    combined_json_cfg = (CFG.get("export", {}).get("combined_json", {}) or {})
-    if combined_json_cfg.get("include_first_pass") and first_pass_results is not None:
-        out["first_pass"] = first_pass_results
-    if combined_json_cfg.get("include_second_pass") and second_pass_result is not None:
-        out["second_pass"] = second_pass_result
-    if combined_json_cfg.get("include_third_pass_raw") and third_pass_raw:
-        out["third_pass"] = third_pass_raw
-
-    # Prefer export.combined_json.filename, fallback to export.filenames.statements_json, then default
-    combined_json_cfg = (CFG.get("export", {}).get("combined_json", {}) or {})
-    json_name_tmpl = combined_json_cfg.get("filename") \
-        or CFG.get("export", {}).get("filenames", {}).get("statements_json") \
-        or "{stem}_statements.json"
-
-    if out_path_override:
-        out_path = Path(out_path_override).expanduser().resolve()
-    else:
-        out_path = Path(pdf_path).with_name(json_name_tmpl.format(stem=stem))
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(out, fh, indent=2)
-    logger.info("Combined JSON written to %s", out_path)
-    return str(out_path)
-
+# Configure logging from config.yaml (console + optional rotating file)
+_logfile = _configure_logging()
 logger = logging.getLogger("FractoPageOCR")
-_lvl = str(CFG.get("logging", {}).get("level", "INFO")).upper()
-logging.basicConfig(
-    level=getattr(logging, _lvl, logging.INFO),
-    format="%(asctime)s %(levelname)-8s %(message)s",
-    datefmt="%H:%M:%S",
-)
 
 import sys
 print(f"[BOOT] Running script: {__file__}", flush=True)
+if _logfile:
+    try:
+        print(f"[BOOT] Log file: {_logfile}", flush=True)
+    except Exception:
+        pass
 try:
     print(f"[BOOT] Excel writer defined at line {excel_ops._write_statements_workbook.__code__.co_firstlineno}", flush=True)
 except Exception as e:
@@ -1771,47 +1132,13 @@ SHEET_NAME         = _default_cfg.get("sheet_name")
 HEADERS = list(MAPPINGS.keys())
 
 
-def call_fracto(
-    file_bytes: bytes,
-    file_name: str,
-    *legacy_args,
-    parser_app: str = PARSER_APP_ID,
-    model: str = MODEL_ID,
-    extra_accuracy: str = "true",
-    qr_range: str | None = None,
-) -> Dict[str, Any]:
-    """Thin wrapper delegating to iwe_core.ocr_client.call_fracto."""
-    from iwe_core.ocr_client import call_fracto as _core_call
-    return _core_call(
-        file_bytes,
-        file_name,
-        *legacy_args,
-        parser_app=parser_app,
-        model=model,
-        extra_accuracy=extra_accuracy,
-        qr_range=qr_range,
-    )
+"""Use iwe_core.ocr_client.call_fracto directly."""
 
 
 
 
 # ─── Helper to persist results ───────────────────────────────────────────
-def save_results(results: List[Dict[str, Any]], pdf_path: str, out_path: str | None = None) -> str:
-    """
-    Persist OCR results to disk.
-
-    If *out_path* is None, a file named "<original‑stem>_ocr.json" is created
-    alongside the input PDF.
-
-    Returns the absolute path to the saved file.
-    """
-    if out_path is None:
-        p = Path(pdf_path).expanduser().resolve()
-        out_path = p.with_name(f"{p.stem}_ocr.json")
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(results, fh, indent=2)
-    logger.info("Results written to %s", out_path)
-    return str(out_path)
+"""Use iwe_core.json_ops.save_results for persisting."""
 
 
 # ─── Simple helper for CLI workflow ──────────────────────────────────────
@@ -1831,7 +1158,7 @@ def process_pdf(pdf_path: str) -> list[dict]:
 def _cli():
     """
     Usage:
-        python -m mcc <pdf-path> [output.json] [output.xlsx] [KEY=VALUE ...]
+        python a.py <pdf-path> [output.json] [output.xlsx] [KEY=VALUE ...]
 
     Convenience:
         • If you pass only two arguments and the second one ends with .xlsx / .xlsm / .xls,
@@ -1840,7 +1167,7 @@ def _cli():
         • Any KEY=VALUE pairs will be written or overwritten in every row of the Excel output.
     """
     if len(sys.argv) < 2:
-        print("Usage: python -m mcc <pdf-path> [output.json] [output.xlsx] [KEY=VALUE ...]")
+        print("Usage: python a.py <pdf-path> [output.json] [output.xlsx] [KEY=VALUE ...]")
         sys.exit(1)
 
     args = sys.argv[1:]
@@ -1895,10 +1222,12 @@ def _cli():
         sys.exit(2)
     # Derive stem (used by writers and disk-scan fallbacks)
     try:
-        stem = Path(pdf_path).expanduser().resolve().stem
+        pdf_p = Path(pdf_path).expanduser().resolve()
+        stem = pdf_p.stem
         logger.info("Output stem derived: %s", stem)
     except Exception:
-        stem = Path(pdf_path).stem
+        pdf_p = Path(pdf_path)
+        stem = pdf_p.stem
 
     # Preflight: ensure API key is present
     if not _resolve_api_key():
@@ -1964,8 +1293,8 @@ def _cli():
             #     periods_by_doc=periods_hint
             # )
             try:
-                json_path = excel_ops._write_statements_json(
-                    pdf_path, stem,
+                json_path = json_ops.write_statements_json(
+                    str(pdf_p), stem,
                     locals().get('combined_rows'),
                     locals().get('groups'),
                     locals().get('routing_used'),
@@ -1979,8 +1308,8 @@ def _cli():
             except TypeError:
                 # periods_by_doc may not be supported; fallback to old signature
                 print("[Main] workbook finished, starting combined JSON writer (legacy signature) …")
-                json_path = excel_ops._write_statements_json(
-                    pdf_path, stem,
+                json_path = json_ops.write_statements_json(
+                    str(pdf_p), stem,
                     locals().get('combined_rows'),
                     locals().get('groups'),
                     locals().get('routing_used'),
@@ -2002,7 +1331,7 @@ def _cli():
 
     # 2️⃣ Persist first‑pass JSON immediately
     # Always persist first-pass JSON to default name (<stem>_ocr.json); reserve CLI json_out for combined statements JSON
-    save_results(results, pdf_path, None)
+    json_ops.save_results(results, str(pdf_p), None)
 
     # 3️⃣ Identify pages to reprocess using configurable criteria (if any), else legacy has_table
     sel_cfg = CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}
@@ -2194,7 +1523,7 @@ def _cli():
 
             # Persist synthetic per-page classification JSON when enabled
             if SAVE_SELECTED_JSON:
-                selected_json_path = Path(pdf_path).with_name(SELECTED_JSON_NAME_TMPL.format(stem=stem))
+                selected_json_path = Path(str(pdf_p)).with_name(SELECTED_JSON_NAME_TMPL.format(stem=stem))
                 with open(selected_json_path, "w", encoding="utf-8") as fh:
                     json.dump(second_res, fh, indent=2)
                 logger.info("Second-pass (per-page) results written to %s", selected_json_path)        
@@ -2203,7 +1532,7 @@ def _cli():
         second_pass_time = time.time() - _t1
         # 6️⃣ Save second JSON as configured
         if SAVE_SELECTED_JSON:
-            selected_json_path = Path(pdf_path).with_name(SELECTED_JSON_NAME_TMPL.format(stem=stem))
+            selected_json_path = Path(str(pdf_p)).with_name(SELECTED_JSON_NAME_TMPL.format(stem=stem))
             with open(selected_json_path, "w", encoding="utf-8") as fh:
                 json.dump(second_res, fh, indent=2)
             logger.info("Second-pass results written to %s", selected_json_path)
@@ -2214,8 +1543,31 @@ def _cli():
         org_type_raw = _second_pass_org_type(pd_payload)
         company_type = normalize_company_type(org_type_raw)
         logger.info("Routing company_type: %s (raw=%r)", company_type, org_type_raw)
+        if not org_type_raw:
+            try:
+                logger.warning(
+                    "[routing] organisation_type not found in second-pass payload; defaulting to %s. "
+                    "Configure CFG.schema.second_pass.organisation_type (e.g., ['organisation_type.type']) to map it.",
+                    company_type,
+                )
+            except Exception:
+                pass
         classification = []
         raw_class = _second_pass_container(pd_payload)
+        # Log second-pass classification inputs for routing visibility
+        try:
+            _dbg_cls = [
+                {
+                    "page_number": int(_second_pass_field(item, "page_number", i)),
+                    "doc_type": _second_pass_field(item, "doc_type"),
+                    "second_doc_type": _second_pass_field(item, "second_doc_type"),
+                    "has_two": _is_truthy_val(_second_pass_field(item, "has_two")),
+                }
+                for i, item in enumerate(raw_class, start=1) if isinstance(item, dict)
+            ]
+            logger.info("[routing] second-pass classification (raw) → %s", _dbg_cls)
+        except Exception:
+            pass
         for i, item in enumerate(raw_class, start=1):
             if not isinstance(item, dict):
                 continue
@@ -2227,7 +1579,7 @@ def _cli():
                 "doc_type": main_dt,
                 "has_two": "true" if has_two else "",
                 "second_doc_type": second_dt,
-                "is_continuation": "true" if _is_truthy_val(_second_pass_field(item, "is_continuation")) else "",
+                    "is_continuation": "true" if is_true_flag(_second_pass_field(item, "is_continuation")) else "",
                 "continuation_of": _second_pass_field(item, "continuation_of"),
             })
         # Fallback: derive classification from first pass (use selected.pdf indexing)
@@ -2266,9 +1618,9 @@ def _cli():
                     main = normalize_doc_type(it.get("doc_type") or it.get("continuation_of"))
                     sec  = normalize_doc_type(it.get("second_doc_type") or "")
                     flags = []
-                    if str(it.get("is_continuation", "")).lower() == "true":
+                    if is_true_flag(it.get("is_continuation")):
                         flags.append("cont")
-                    if str(it.get("has_two", "")).lower() == "true" or str(it.get("Has_multiple_sections", "")).lower() == "true":
+                    if is_true_flag(it.get("has_two")) or is_true_flag(it.get("Has_multiple_sections")):
                         flags.append("has_two")
                     lab = main or "Others"
                     if sec and sec != "Others" and sec != lab:
@@ -2285,6 +1637,14 @@ def _cli():
             groups = build_groups(selected_pages, classification, orig_bytes, first_pass_results=results)
 
             if groups:
+                # Summary line: list all groups with page ranges
+                try:
+                    _summary = "; ".join(
+                        f"{dt}: {format_ranges(sorted(pages))}" for dt, pages in sorted(groups.items())
+                    )
+                    logger.info("[groups] Third pass groups → %s", _summary)
+                except Exception:
+                    pass
                 _t2 = time.time()
                 logger.info("Third pass: processing %d doc_type groups → %s", len(groups), sorted(groups.keys()))
 
@@ -2314,7 +1674,23 @@ def _cli():
                             .replace("/", "_")
                         )
 
+                        # Show the final routing keys we are about to use
+                        try:
+                            logger.info(
+                                "[routing] inputs: ct_raw=%r ct=%s doc_raw=%r doc_norm=%s key=%s",
+                                org_type_raw,
+                                company_type,
+                                doc_type,
+                                normalize_doc_type(doc_type),
+                                normalize_doc_type(doc_type).strip().lower(),
+                            )
+                        except Exception:
+                            pass
                         parser_app, model_id, extra_acc = _resolve_routing(doc_type, company_type=company_type)
+                        if parser_app is None:
+                            routing_used[doc_type] = {"parser_app": None, "model": None, "extra": None, "company_type": company_type, "skipped": True, "reason": "disabled"}
+                            logger.info("↷ Skipping %s via company_type=%s (disabled; no fallback)", doc_type, company_type)
+                            continue
                         routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc, "company_type": company_type}
                         logger.info("→ Routing %s via company_type=%s → parser=%s, model=%s, extra=%s, pages=%s",
                                     doc_type, company_type, parser_app, model_id, extra_acc, page_list)
@@ -2330,7 +1706,7 @@ def _cli():
                                 model=model_id,
                                 extra_accuracy=extra_acc,
                             )
-                            futures[fut] = (doc_type, Path(pdf_path).with_name(CFG.get("export", {}).get("filenames", {}).get("group_json", "{stem}_{slug}_ocr.json").format(stem=stem, slug=slug)), None)
+                            futures[fut] = (doc_type, Path(str(pdf_p)).with_name(CFG.get("export", {}).get("filenames", {}).get("group_json", "{stem}_{slug}_ocr.json").format(stem=stem, slug=slug)), None)
                         else:
                             for pno in page_list:
                                 page_bytes = build_pdf_from_pages(orig_bytes, [pno])
@@ -2342,7 +1718,7 @@ def _cli():
                                     model=model_id,
                                     extra_accuracy=extra_acc,
                                 )
-                                futures[fut] = (doc_type, Path(pdf_path).with_name(CFG.get("export", {}).get("filenames", {}).get("group_json", "{stem}_{slug}_ocr.json").format(stem=f"{stem}", slug=f"{slug}_p{pno}")), pno)
+                                futures[fut] = (doc_type, Path(str(pdf_p)).with_name(CFG.get("export", {}).get("filenames", {}).get("group_json", "{stem}_{slug}_ocr.json").format(stem=f"{stem}", slug=f"{slug}_p{pno}")), pno)
 
                     for fut in as_completed(futures):
                         doc_type, group_json_path, pno = futures[fut]
@@ -2358,11 +1734,11 @@ def _cli():
                             except Exception:
                                 pass
 
-                            rows_list = _extract_rows(parsed)
-                            if _debug_enabled():
+                            rows_list = json_ops.extract_rows(parsed)
+                            if debug_enabled():
                                 try:
                                     oa = [r for r in (rows_list or []) if str(r.get("Particulars","" )).strip().lower() == "other assets"]
-                                    _dprint(f"rows extracted for {doc_type}: {len(rows_list)} | other_assets={oa[:1]}")
+                                    dprint(f"rows extracted for {doc_type}: {len(rows_list)} | other_assets={oa[:1]}")
                                 except Exception:
                                     pass
 
@@ -2382,11 +1758,11 @@ def _cli():
                                 rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                                 df = pd.DataFrame(rows, columns=all_keys)
                                 df = excel_ops._normalize_df_for_excel(doc_type, df)
-                                if _debug_enabled():
+                                if debug_enabled():
                                     try:
                                         _sample = df[df["Particulars"].astype(str).str.strip().str.lower()=="other assets"].head(1)
                                         if not _sample.empty:
-                                            _dprint(f"df after sanitize [{doc_type}] other_assets=", _sample.to_dict("records")[:1])
+                                            dprint(f"df after sanitize [{doc_type}] other_assets=", _sample.to_dict("records")[:1])
                                     except Exception:
                                         pass
                                 if doc_type in combined_sheets and combined_sheets[doc_type] is not None and not combined_sheets[doc_type].empty:
@@ -2422,7 +1798,7 @@ def _cli():
                         for k, v in (combined_sheets or {}).items()
                     }
                     try:
-                        json_written_path = excel_ops._write_statements_json(
+                        json_written_path = json_ops.write_statements_json(
                             pdf_path=pdf_path,
                             stem=stem,
                             combined_rows=combined_rows,
@@ -2482,7 +1858,7 @@ def _cli():
                             or CFG.get("labels", {}).get("canonical", []) \
                             or []
                         _empty_rows = {sn: [] for sn in sheet_order}
-                        _ = excel_ops._write_statements_json(
+                        _ = json_ops.write_statements_json(
                             pdf_path=pdf_path,
                             stem=stem,
                             combined_rows=_empty_rows,
@@ -2526,7 +1902,7 @@ def _renumber_serials(results: list[dict],
     """
     counter = 1
     for res in results:
-        rows = _extract_rows(res.get("data", []))
+        rows = json_ops.extract_rows(res.get("data", []))
         for row in rows:
             row[json_field] = counter
             counter += 1
@@ -2542,88 +1918,13 @@ if __name__ == "__main__":
     try:
         argv = sys.argv[1:]
         if argv and argv[0] in {"from-json", "--from-json"}:
-            out_xlsx = None
-            pdf_hint = None
-            jsons = []
-            it = iter(argv[1:])
-            for tok in it:
-                if tok == "--pdf":
-                    try:
-                        pdf_hint = next(it)
-                    except StopIteration:
-                        pdf_hint = None
-                    continue
-                if out_xlsx is None and tok.lower().endswith((".xlsx",".xlsm",".xls")):
-                    out_xlsx = tok
-                    continue
-                jsons.append(tok)
-            if not jsons:
-                print("from-json mode: provide one or more *_ocr.json files")
-                sys.exit(1)
-            base = Path(jsons[0]).expanduser().resolve()
-            if out_xlsx is None:
-                out_xlsx = str(base.with_name(f"{base.stem.replace('_ocr','')}_statements.xlsx"))
-            stub_pdf = pdf_hint or str(base.with_suffix('.pdf'))
-            # Build combined_sheets and periods map
-            import pandas as pd, json as _json
-            combined_sheets: dict[str, pd.DataFrame] = {}
-            periods_by_doc: dict[str, dict] = {}
-            for jp in jsons:
-                p = Path(jp).expanduser().resolve()
-                try:
-                    obj = _json.loads(Path(p).read_text(encoding='utf-8'))
-                except Exception:
-                    print(f"[from-json] Skip unreadable JSON: {p}")
-                    continue
-                pd_payload = ((obj.get('data') or {}).get('parsedData')) or obj.get('parsedData') or {}
-                if not isinstance(pd_payload, (dict,list)):
-                    continue
-                # Derive doc type and normalize
-                try:
-                    dt_guess = _doc_type_from_payload(pd_payload)
-                except Exception:
-                    dt_guess = None
-                if not dt_guess:
-                    slug = p.stem
-                    dt_guess = normalize_doc_type(slug.replace('_',' '))
-                doc_type = normalize_doc_type(dt_guess)
-                # Extract rows and make DF
-                rows = _extract_rows(pd_payload)
-                if not rows:
-                    continue
-                # Union all keys for stable columns
-                all_keys = []
-                for r in rows:
-                    for k in r.keys():
-                        if k not in all_keys:
-                            all_keys.append(k)
-                df = pd.DataFrame([{k: r.get(k, '') for k in all_keys} for r in rows], columns=all_keys)
-                df = sanitize_statement_df(doc_type, df)
-                combined_sheets[doc_type] = df
-                # Periods
-                try:
-                    by_id, _labels = _extract_period_maps_from_payload(pd_payload if isinstance(pd_payload, dict) else {})
-                    if by_id:
-                        periods_by_doc[doc_type] = by_id
-                except Exception:
-                    pass
-            if not combined_sheets:
-                print("from-json mode: no sheets built from provided JSONs")
-                sys.exit(2)
-            # Call shared workbook writer
-            stem = Path(out_xlsx).stem.replace('_statements','')
-            xlsx_path = excel_ops._write_statements_workbook(stub_pdf, stem, combined_sheets, routing_used=None, periods_by_doc=periods_by_doc)
-            # Move/rename to desired out_xlsx if different
-            try:
-                out_xlsx_p = Path(out_xlsx).expanduser().resolve()
-                if str(out_xlsx_p) != str(Path(xlsx_path).expanduser().resolve()):
-                    Path(xlsx_path).replace(out_xlsx_p)
-                    xlsx_path = str(out_xlsx_p)
-            except Exception:
-                pass
-            print(f"[from-json] Workbook written → {xlsx_path}")
-            sys.exit(0)
+            from iwe_core.cli import run_from_json_argv
+            sys.exit(run_from_json_argv(argv[1:]))
     except Exception as _e:
         print("[from-json] Failed:", _e)
-    # Default CLI
-    _cli()
+    # Default CLI → delegate to pipeline
+    try:
+        from iwe_core.pipeline import run_cli as _run_cli
+        sys.exit(_run_cli(sys.argv[1:]))
+    except Exception as _pex:
+        print("[pipeline] Failed:", _pex)

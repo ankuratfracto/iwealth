@@ -1,3 +1,9 @@
+"""Small PDF helpers built on PyPDF2.
+
+Offers page‑subset extraction (`build_pdf_from_pages`) and page‑count
+helpers for bytes and streams, used across OCR passes and tests.
+"""
+
 from __future__ import annotations
 
 import io

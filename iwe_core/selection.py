@@ -1,3 +1,10 @@
+"""Config‑driven selection and JSON access helpers.
+
+Implements generic truthy checks, shallow JSON path access, and rule‑based
+selection used to pick pages for second pass and extract fields from
+second‑pass payloads.
+"""
+
 from __future__ import annotations
 
 import re
@@ -176,6 +183,22 @@ def _first_pass_has_table(res: dict) -> bool:
                 return True
         return False
     return _is_truthy_val(pdict.get(field))
+
+
+def expand_selected_pages(selected_pages: list[int], total_pages: int, radius: int = 1) -> list[int]:
+    """Expand selected page numbers by a neighbour radius, clamped to [1, total_pages]."""
+    s = set()
+    total = max(1, int(total_pages or 0))
+    for p in selected_pages or []:
+        try:
+            q0 = int(p)
+        except Exception:
+            continue
+        for d in range(-radius, radius + 1):
+            q = q0 + d
+            if 1 <= q <= total:
+                s.add(q)
+    return sorted(s)
 
 
 def _second_pass_container(pd_payload: dict | list) -> list:

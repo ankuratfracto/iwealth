@@ -1,3 +1,10 @@
+"""Grouping and document‑type normalization utilities.
+
+Provides heuristics to normalise doc type labels, extract simple page
+texts from PDFs, infer types from headers, and build third‑pass groups
+from classifier outputs combined with header hints.
+"""
+
 from __future__ import annotations
 
 import io
@@ -7,6 +14,7 @@ import logging
 from PyPDF2 import PdfReader
 
 from .config import CFG
+from .utils import is_true_flag
 
 
 logger = logging.getLogger(__name__)
@@ -32,13 +40,24 @@ _DOC_NORMALISATIONS: list[tuple[str, str]] = [
 
 
 def normalize_doc_type(label: str | None) -> str:
+    """Map raw doc_type strings to canonical labels used for routing.
+
+    Debug logging shows the input, matched pattern (when any), and output label.
+    """
     s = _canon_text(label or "")
     if not s:
+        logger.debug("[grouping] normalize_doc_type: empty/None → 'Others'")
         return "Others"
     for pat, out in _DOC_NORMALISATIONS:
         if re.search(pat, s):
+            try:
+                logger.debug("[grouping] normalize_doc_type: %r matched /%s/ → %r", label, pat, out)
+            except Exception:
+                pass
             return out
-    return (label or "Others").strip().title()
+    out = (label or "Others").strip().title()
+    logger.debug("[grouping] normalize_doc_type: no regex match for %r → %r", label, out)
+    return out
 
 
 def extract_page_texts_from_pdf_bytes(pdf_bytes: bytes) -> list[str]:
@@ -77,7 +96,12 @@ def infer_doc_type_from_text(text: str) -> str | None:
     if not base:
         return None
     prefix = "Consolidated " if is_cons and not is_stand else ("Standalone " if is_stand else "")
-    return f"{prefix}{base}".strip()
+    inferred = f"{prefix}{base}".strip()
+    try:
+        logger.debug("[grouping] infer_doc_type_from_text: inferred=%r (is_cons=%s, is_stand=%s)", inferred, is_cons, is_stand)
+    except Exception:
+        pass
+    return inferred
 
 
 def build_groups(
@@ -87,13 +111,45 @@ def build_groups(
     first_pass_results: list[dict] | None = None,
 ) -> dict[str, list[int]]:
     doc_by_page: dict[int, str] = {}
+    # Helper: map a reported page_number to original PDF page number.
+    # Some classifiers return 1..N relative to the selected PDF; others return
+    # original absolute page numbers. Try both interpretations.
+    def _sel_to_orig(sel_no: int) -> int | None:
+        if not isinstance(sel_no, int):
+            return None
+        if 1 <= sel_no <= len(selected_pages):
+            return selected_pages[sel_no - 1]
+        # If value looks like original page index and is present in selection
+        if sel_no in selected_pages:
+            return sel_no
+        # Fallback: single-page selection → map any classification to that page
+        if len(selected_pages) == 1:
+            try:
+                logger.debug("[grouping] map page_number=%s to single selected page %s", sel_no, selected_pages[0])
+            except Exception:
+                pass
+            return selected_pages[0]
+        return None
+    try:
+        _dbg_cls = [
+            {
+                "page_number": item.get("page_number"),
+                "doc_type": item.get("doc_type"),
+                "has_two": item.get("has_two") or item.get("Has_multiple_sections"),
+                "second_doc_type": item.get("second_doc_type") or item.get("Second_doc_type"),
+            }
+            for item in (classification or []) if isinstance(item, dict)
+        ]
+        logger.debug("[grouping] build_groups: classification summary → %s", _dbg_cls)
+    except Exception:
+        pass
     for item in classification or []:
         sel_no = item.get("page_number")
-        is_cont = str(item.get("is_continuation", "")).lower() == "true"
+        is_cont = is_true_flag(item.get("is_continuation"))
         dt_raw = (item.get("continuation_of") if is_cont else None) or item.get("doc_type")
         dt = normalize_doc_type(dt_raw)
-        if isinstance(sel_no, int) and 1 <= sel_no <= len(selected_pages):
-            orig = selected_pages[sel_no - 1]
+        orig = _sel_to_orig(sel_no) if isinstance(sel_no, int) else None
+        if orig is not None:
             doc_by_page[orig] = dt
 
     inherit_on_cont = bool(CFG.get("grouping", {}).get("inherit_scope_on_continuation", True))
@@ -101,25 +157,25 @@ def build_groups(
     if inherit_on_cont:
         for item in classification or []:
             sel_no = item.get("page_number")
-            is_cont = str(item.get("is_continuation", "")).lower() == "true"
+            is_cont = is_true_flag(item.get("is_continuation"))
             if not is_cont or not isinstance(sel_no, int):
                 continue
-            if 1 <= sel_no <= len(selected_pages):
-                cont_orig_pages.add(selected_pages[sel_no - 1])
+            orig = _sel_to_orig(sel_no)
+            if orig is not None:
+                cont_orig_pages.add(orig)
 
-    def _is_true(x):
-        return str(x).strip().lower() in ("true", "1", "yes", "y", "on")
-
+    # has_two flags: centralized strict parsing from utils
     has_two_orig_pages: set[int] = set()
     for item in classification or []:
         sel_no = item.get("page_number")
         if not isinstance(sel_no, int):
             continue
-        has_two_flag = _is_true(item.get("has_two") or item.get("Has_multiple_sections") or "")
+        has_two_flag = is_true_flag(item.get("has_two") or item.get("Has_multiple_sections"))
         if not has_two_flag:
             continue
-        if 1 <= sel_no <= len(selected_pages):
-            has_two_orig_pages.add(selected_pages[sel_no - 1])
+        orig = _sel_to_orig(sel_no)
+        if orig is not None:
+            has_two_orig_pages.add(orig)
 
     prevent_override_others = bool(CFG.get("grouping", {}).get("prevent_override_when_others", True))
     page_texts = extract_page_texts_from_pdf_bytes(original_pdf_bytes)
@@ -173,9 +229,8 @@ def build_groups(
         sel_no = item.get("page_number")
         if not isinstance(sel_no, int):
             continue
-        if 1 <= sel_no <= len(selected_pages):
-            orig = selected_pages[sel_no - 1]
-        else:
+        orig = _sel_to_orig(sel_no)
+        if orig is None:
             continue
 
         second_dt_raw = (

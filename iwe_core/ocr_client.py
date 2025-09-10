@@ -1,3 +1,10 @@
+"""Thin client for Fracto Smart‑OCR with retries and chunking.
+
+Resolves API settings/keys from config/env, uploads PDFs (or page chunks)
+to the OCR endpoint with robust error handling, and exposes serial and
+parallel call helpers used by the pipeline.
+"""
+
 from __future__ import annotations
 
 import io
@@ -50,13 +57,19 @@ def _get_session() -> requests.Session:
         # Configure retries if available
         try:
             if Retry is not None:
+                conc = (CFG.get("concurrency", {}) or {})
+                max_parallel = int(conc.get("max_parallel", 9)) or 9
                 retry = Retry(
                     total=3,
+                    connect=3,
+                    read=3,
                     backoff_factor=0.5,
                     status_forcelist=(429, 500, 502, 503, 504),
                     allowed_methods=("POST", "GET"),
+                    respect_retry_after_header=True,
+                    raise_on_status=False,
                 )
-                adapter = HTTPAdapter(max_retries=retry)
+                adapter = HTTPAdapter(max_retries=retry, pool_connections=max_parallel, pool_maxsize=max_parallel)
                 sess.mount("http://", adapter)
                 sess.mount("https://", adapter)
         except Exception:
@@ -211,4 +224,3 @@ def call_fracto_parallel(pdf_bytes: bytes, file_name: str, *, extra_accuracy: st
 
 
 __all__ = ["call_fracto", "call_fracto_parallel", "resolve_api_key"]
-

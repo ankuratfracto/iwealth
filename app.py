@@ -1,262 +1,220 @@
-# app.py
+"""Streamlit app for PDF → OCR → Excel with progress.
+
+Interactive frontend that runs the iWealth OCR pipeline using the
+`iwe_core` package, shows progress, and emits a styled statements
+workbook plus a combined JSON. Intended for manual runs and demos.
+"""
 
 from __future__ import annotations
-import importlib, logging, a as _mcc_mod
-importlib.reload(_mcc_mod)
-from a import FORMATS     # refresh the constant after reload
-from a import call_fracto_parallel, write_excel_from_ocr
-try:
-    from a import generate_statements_excel  # optional; present on latest code
-except ImportError as exc:
-    logging.getLogger(__name__).warning(
-        "Failed to import generate_statements_excel from module 'a': %s", exc
-    )
-    generate_statements_excel = None  # type: ignore
+import logging
+import re
+
+# Use iwe_core directly (remove dependency on local a.py)
+from iwe_core.config import CFG
+from iwe_core.ocr_client import call_fracto_parallel, call_fracto
+from iwe_core.excel_ops import (
+    write_excel_from_ocr,
+    generate_statements_excel,
+    sanitize_statement_df,
+    expand_selected_pages,
+    _write_statements_workbook,
+)
+from iwe_core.grouping import (
+    normalize_doc_type,
+    extract_page_texts_from_pdf_bytes,
+    infer_doc_type_from_text,
+    build_groups,
+)
+from iwe_core.utils import (
+    company_type_from_token,
+    format_ranges,
+    is_true_flag,
+)
+from iwe_core.json_ops import extract_rows as _extract_rows
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Fallback: define generate_statements_excel locally if not provided by module `a`
-if generate_statements_excel is None:
-    import io as _io
-    import pandas as _pd
-    from openpyxl.styles import Font as _Font, Alignment as _Alignment, PatternFill as _PatternFill
+# ---- Helpers migrated from local a.py (config-driven formats, routing, company type) ----
+import os
+import io as _io
+import pandas as _pd
 
-    def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes | None:  # type: ignore
-        # PDF page assembly handled by iwe_core.pdf_ops
-        def _is_true(x):
-            return str(x).strip().lower() in ("true", "1", "yes", "y")
-        # 1) First pass
-        results = _mcc_mod.call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=_mcc_mod.EXTRA_ACCURACY_FIRST)
 
-        # 2) Select pages where has_table=true (fallback to old logic if none)
-        def _get_has_table(res: dict) -> bool:
-            field = getattr(_mcc_mod, "HAS_TABLE_FIELD", "has_table")
-            pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
-            if isinstance(pdict, list):
-                for item in pdict:
-                    if isinstance(item, dict) and field in item:
-                        return _is_true(item.get(field))
-                return False
-            return _is_true(pdict.get(field))
-        selected_pages = [idx + 1 for idx, res in enumerate(results) if _get_has_table(res)]
-        # Optional neighbour expansion via env var (default 0 to keep it strict)
-        try:
-            _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", str(getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0))))
-        except Exception:
-            _radius = getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0)
-        selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=_radius)
-        if not selected_pages:
-            # Fallback: previous heuristic
-            selected_pages = [
-                idx + 1
-                for idx, res in enumerate(results)
-                if (
-                    res.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
-                    or _is_true(res.get("data", {}).get("parsedData", {}).get("Has_multiple_sections"))
-                )
-            ]
-            selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=_radius)
-        if not selected_pages:
-            selected_pages = list(range(1, len(results) + 1))
+def _load_formats_from_yaml() -> dict:
+    """Load Excel output formats from mapping.yaml configured under CFG.paths.mapping_yaml."""
+    mapping_rel = (CFG.get("paths", {}) or {}).get("mapping_yaml", "mapping.yaml")
+    mapping_file = (Path(__file__).parent / mapping_rel).expanduser().resolve()
+    formats: dict[str, dict] = {}
+    if not mapping_file.exists():
+        return formats
+    try:
+        import yaml as _yaml
+        data = _yaml.safe_load(mapping_file.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return formats
 
-        # Build selected-pages PDF for second pass
-        from iwe_core.pdf_ops import build_pdf_from_pages
-        selected_bytes = build_pdf_from_pages(pdf_bytes, selected_pages)
+    if isinstance(data, dict) and "formats" in data:
+        for name, cfg in (data.get("formats") or {}).items():
+            if isinstance(cfg, dict):
+                formats[str(name)] = cfg
 
-        # 3) Second pass
-        stem = Path(original_filename).stem
-        sel_pdf_name = _mcc_mod.SELECTED_PDF_NAME_TMPL.format(stem=stem)
-        second_res = _mcc_mod.call_fracto(
-            selected_bytes,
-            sel_pdf_name,
-            parser_app=_mcc_mod.SECOND_PARSER_APP_ID,
-            model=_mcc_mod.SECOND_MODEL_ID,
-            extra_accuracy=_mcc_mod.EXTRA_ACCURACY_SECOND,
-        )
+    if isinstance(data, dict) and "excel_export" in data:
+        formats["Customs Invoice"] = data["excel_export"]
 
-        # Normalize second_res into a dict if API returned JSON text/bytes
-        if isinstance(second_res, (bytes, bytearray)):
-            try:
-                import json as _json
-                second_res = _json.loads(second_res.decode("utf-8", "ignore"))
-            except Exception:
-                second_res = {}
-        elif isinstance(second_res, str):
-            try:
-                import json as _json
-                second_res = _json.loads(second_res)
-            except Exception:
-                second_res = {}
+    for key, val in (data.items() if isinstance(data, dict) else []):
+        if isinstance(key, str) and key.startswith("excel_export_") and isinstance(val, dict):
+            pretty = key.replace("excel_export_", "").replace("_", " ").title()
+            formats[pretty] = val
 
-        if not isinstance(second_res, dict):
-            logging.getLogger(__name__).error("Second pass returned non-JSON for %s; aborting.", original_filename)
-            return None
+    if not formats and isinstance(data, dict):
+        formats["Customs Invoice"] = {"mappings": data}
 
-        # 4) Classification (with fallback)
-        pd_payload = (second_res.get("data", {}) or {}).get("parsedData", {})
-        classification = []
-        # Robust: accept either 'page_wise_classification' or 'classification'
-        if isinstance(pd_payload, dict):
-            classification = pd_payload.get("page_wise_classification") or pd_payload.get("classification") or []
-        elif isinstance(pd_payload, list):
-            classification = pd_payload
-        else:
-            classification = []
+    for cfg in formats.values():
+        if "mappings" not in cfg:
+            cfg["mappings"] = {}
+        tp = cfg.get("template_path")
+        if tp:
+            cfg["template_path"] = (Path(__file__).parent / str(tp)).expanduser().resolve()
+    return formats
 
-        # Normalise classification into common shape if needed (list of dicts)
-        norm_class = []
-        for i, item in enumerate(classification, start=1):
-            if not isinstance(item, dict):
-                continue
-            main_dt = item.get("doc_type") or item.get("Document_type")
-            has_two = str(item.get("has_two") or item.get("Has_multiple_sections") or "").strip().lower() in ("true","1","yes","y","on")
-            second_dt = item.get("second_doc_type") or item.get("Second_doc_type")
-            norm_class.append({
-                "page_number": int(item.get("page_number") or i),
-                "doc_type": main_dt,
-                "has_two": "true" if has_two else "",
-                "second_doc_type": second_dt,
-                "is_continuation": "true" if str(item.get("is_continuation") or "").lower() == "true" else "",
-                "continuation_of": item.get("continuation_of"),
-            })
-        classification = norm_class
 
-        # Derive company_type from second-pass payload if provided
-        org_type_raw = None
-        if isinstance(pd_payload, dict):
-            org_type_raw = (pd_payload.get("organisation_type") or {}).get("type")
-        company_type = _mcc_mod.normalize_company_type(org_type_raw)
-        logging.getLogger(__name__).info("Routing company_type: %s (raw=%r)", company_type, org_type_raw)
+FORMATS = _load_formats_from_yaml()
 
-        # 5) Group pages by doc_type (robust: classification + header heuristics + smoothing + dual-sections)
-        groups = _mcc_mod.build_groups(
-            selected_pages, classification, pdf_bytes, first_pass_results=results
-        )
-        if not groups:
-            return None
 
-        # 6) Third pass per group (sequential to be Cloud-friendly)
-        combined_sheets: dict[str, _pd.DataFrame] = {}
-        routing_used: dict[str, dict] = {}
-        periods_hint: dict[str, dict] = {}
-        for doc_type, page_list in groups.items():
-            page_list = sorted(page_list)
-            from iwe_core.pdf_ops import build_pdf_from_pages
-            group_bytes = build_pdf_from_pages(pdf_bytes, page_list)
+def normalize_company_type(ct_raw: str | None) -> str:
+    s = re.sub(r"\s+", " ", (ct_raw or "").strip().lower())
+    if not s:
+        return str((CFG.get("company_type_prior", {}) or {}).get("default", "corporate")).lower()
+    tokens = [t.strip() for t in re.split(r"[|/,;]+", s) if t.strip()]
+    for tok in tokens:
+        cls = company_type_from_token(tok)
+        if cls:
+            return cls
+    if "bank" in s and "non banking" not in s and "non-banking" not in s:
+        return "bank"
+    if "nbfc" in s or "non banking financial" in s or "non-banking financial" in s:
+        return "nbfc"
+    if "insur" in s:
+        return "insurance"
+    if "non financial" in s or "corporate" in s or "company" in s:
+        return "corporate"
+    return str((CFG.get("company_type_prior", {}) or {}).get("default", "corporate")).lower()
 
-            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type, company_type=company_type)
-            if parser_app is None:
-                routing_used[doc_type] = {"parser_app": None, "model": None, "extra": None, "company_type": company_type, "skipped": True, "reason": "disabled"}
-                logging.getLogger(__name__).info(
-                    "↷ Skipping %s via company_type=%s (disabled; no fallback)",
-                    doc_type, company_type
-                )
-                continue
-            routing_used[doc_type] = {"parser_app": parser_app, "model": model_id, "extra": extra_acc, "company_type": company_type}
-            logging.getLogger(__name__).info(
-                "→ Routing %s via company_type=%s → parser=%s, model=%s, extra=%s, pages=%s",
-                doc_type, company_type, parser_app, model_id, extra_acc, page_list
-            )
 
-            group_res = _mcc_mod.call_fracto(
-                group_bytes,
-                f"{stem}_{doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')}.pdf",
-                parser_app=parser_app,
-                model=model_id,
-                extra_accuracy=extra_acc,
-            )
+# Routing config helpers
+_ROUTING_CFG = CFG.get("routing", {}) or {}
+_ROUTING_COMPANY_DEFAULT = str((CFG.get("company_type_prior", {}) or {}).get("default", "corporate")).lower()
+_ROUTING_FALLBACK_ORDER = _ROUTING_CFG.get(
+    "fallback_order",
+    ["company_type_and_doc_type", "corporate_and_doc_type", "third_defaults"],
+)
+_ROUTING_ALLOWED_PARSERS = set(((_ROUTING_CFG.get("allowed_parsers") or []) or []))
+_ROUTING_BLOCKED_PARSERS = set(((_ROUTING_CFG.get("blocked_parsers") or []) or []))
+_ROUTING_SKIP_ON_DISABLED = bool(_ROUTING_CFG.get("skip_on_disabled", True))
 
-            # Normalize group_res into a dict (handle text/bytes from API)
-            if isinstance(group_res, (bytes, bytearray)):
+
+def _resolve_routing(doc_type: str, company_type: str | None = None) -> tuple[str | None, str | None, str | None]:
+    """Resolve parser/model/extra for a doc_type with detailed routing logs.
+
+    Logs inputs, searched keys, allow/block effects, fallbacks attempted,
+    and the final outcome. Uses INFO level to surface during normal runs.
+    """
+    logger = logging.getLogger(__name__)
+    dt = (doc_type or "").strip().lower()
+    ct = (company_type or _ROUTING_COMPANY_DEFAULT or "corporate").strip().lower()
+
+    # Snapshot routing context for visibility
+    try:
+        _ct_keys = sorted(list((_ROUTING_CFG.get(ct) or {}).keys())) if isinstance(_ROUTING_CFG.get(ct), dict) else []
+        _corp_keys = sorted(list((_ROUTING_CFG.get("corporate") or {}).keys())) if isinstance(_ROUTING_CFG.get("corporate"), dict) else []
+        _allowed = sorted(list(_ROUTING_ALLOWED_PARSERS)) if _ROUTING_ALLOWED_PARSERS else []
+        _blocked = sorted(list(_ROUTING_BLOCKED_PARSERS)) if _ROUTING_BLOCKED_PARSERS else []
+        logger.info("[routing] inputs: company_type=%s doc_type=%s", ct, dt)
+        logger.info("[routing] available doc_type keys → ct=%s: %s | corporate: %s", ct, _ct_keys, _corp_keys)
+        if _allowed:
+            logger.info("[routing] allowed_parsers=%s", _allowed)
+        if _blocked:
+            logger.info("[routing] blocked_parsers=%s", _blocked)
+        logger.info("[routing] skip_on_disabled=%s; fallback_order=%s", _ROUTING_SKIP_ON_DISABLED, _ROUTING_FALLBACK_ORDER)
+    except Exception:
+        pass
+
+    def _lookup(ct_key: str, dt_key: str):
+        ct_map = _ROUTING_CFG.get(ct_key, {})
+        if isinstance(ct_map, dict):
+            hit = ct_map.get(dt_key)
+            if isinstance(hit, dict):
+                # Per-entry enable toggle
+                if str(hit.get("enable", True)).strip().lower() in {"false", "0", "no", "off"}:
+                    if _ROUTING_SKIP_ON_DISABLED:
+                        try:
+                            logger.info("[routing] %s/%s is disabled and skip_on_disabled=true → skipping", ct_key, dt_key)
+                        except Exception:
+                            pass
+                        return (None, None, None)
+                    try:
+                        logger.info("[routing] %s/%s is disabled but skip_on_disabled=false → ignoring disable (will continue fallbacks)", ct_key, dt_key)
+                    except Exception:
+                        pass
+                    return None
+                parser = hit.get("parser") or (CFG.get("passes", {}).get("third", {}).get("defaults", {}) or {}).get("parser_app", "")
+                model = hit.get("model") or (CFG.get("passes", {}).get("third", {}).get("defaults", {}) or {}).get("model", "tv6")
+                extra = str(hit.get("extra", (CFG.get("passes", {}).get("third", {}).get("defaults", {}) or {}).get("extra_accuracy", True))).lower()
+                # Global allow/block checks
+                if _ROUTING_ALLOWED_PARSERS and parser not in _ROUTING_ALLOWED_PARSERS:
+                    try:
+                        logger.info("[routing] parser %s not in allowed_parsers; falling back", parser)
+                    except Exception:
+                        pass
+                    return None
+                if parser in _ROUTING_BLOCKED_PARSERS:
+                    try:
+                        logger.info("[routing] parser %s is blocked; falling back", parser)
+                    except Exception:
+                        pass
+                    return None
                 try:
-                    import json as _json
-                    group_res = _json.loads(group_res.decode("utf-8", "ignore"))
-                except Exception:
-                    group_res = {}
-            elif isinstance(group_res, str):
-                try:
-                    import json as _json
-                    group_res = _json.loads(group_res)
-                except Exception:
-                    group_res = {}
-
-            if not isinstance(group_res, dict):
-                logging.getLogger(__name__).warning("Third-pass '%s' returned non-JSON; skipping group.", doc_type)
-                continue
-
-            # Collect period metadata for this doc_type (id -> meta dict)
-            try:
-                _periods = (((group_res or {}).get("data", {}) or {}).get("parsedData", {}) or {}).get("meta", {}).get("periods") or []
-                _by_id = {}
-                for _p in _periods:
-                    if isinstance(_p, dict):
-                        _pid = str((_p.get("id") or "")).strip().lower()
-                        if _pid:
-                            _by_id[_pid] = {
-                                "label": _p.get("label") or "",
-                                "start_date": _p.get("start_date"),
-                                "end_date": _p.get("end_date"),
-                                "role": _p.get("role"),
-                                "is_cumulative": _is_true(_p.get("is_cumulative")),
-                                "is_audited": _is_true(_p.get("is_audited")),
-                            }
-                if _by_id:
-                    periods_hint[doc_type] = _by_id
-            except Exception:
-                pass
-        
-            parsed = group_res.get("data", {}).get("parsedData", [])
-            rows_list = _mcc_mod._extract_rows(parsed)
-            if rows_list:
-                all_keys = []
-                for row in rows_list:
-                    for k in row.keys():
-                        if k not in all_keys: 
-                            all_keys.append(k)
-                rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
-                df = _pd.DataFrame(rows, columns=all_keys)
-                df = _mcc_mod.sanitize_statement_df(doc_type, df)
-                # Preserve LLM parse order by default; enable reorder only via env flag
-                try:
-                    import os as _os
-                    if str(_os.getenv("IWEALTH_ENABLE_REORDER", "0")).strip() in {"1", "true", "yes"}:
-                        df = reorder_dataframe_sections_first(df)
+                    logger.info("[routing] matched %s/%s → parser=%s, model=%s, extra=%s", ct_key, dt_key, parser, model, extra)
                 except Exception:
                     pass
-                combined_sheets[doc_type] = df
+                return (parser, model, extra)
+        return None
 
-        if not combined_sheets:
-            return None
-
-        # 7) Write workbook using the shared CLI writer (single-pass, correct headers)
-        import tempfile as _tempfile, shutil as _shutil, json as _json
-        tmpdir = Path(_tempfile.mkdtemp(prefix="iwealth_")).resolve()
+    for mode in _ROUTING_FALLBACK_ORDER:
         try:
-            # Save the uploaded PDF so the writer can resolve paths & infer BS labels if needed
-            tmp_pdf_path = (tmpdir / f"{stem}.pdf")
-            tmp_pdf_path.write_bytes(pdf_bytes)
-
-            # Provide pages mapping so the writer can infer BS headers from PDF if periods are missing
-            json_name_tmpl = _mcc_mod.CFG.get("export", {}).get("combined_json", {}).get("filename", "{stem}_statements.json")
-            combined_obj = {"documents": {dt: {"pages": groups.get(dt, [])} for dt in groups}}
-            (tmpdir / json_name_tmpl.format(stem=stem)).write_text(_json.dumps(combined_obj), encoding="utf-8")
-
-            # Call the shared writer; it returns the xlsx path
-            xlsx_out = _mcc_mod._write_statements_workbook(
-                str(tmp_pdf_path),
-                stem,
-                combined_sheets,
-                routing_used=routing_used,
-                periods_by_doc=periods_hint
-            )
-            xlsx_bytes = Path(xlsx_out).read_bytes()
-            return xlsx_bytes
-        finally:
+            logger.info("[routing] attempt=%s ct=%s dt=%s", mode, ct, dt)
+        except Exception:
+            pass
+        if mode == "company_type_and_doc_type":
+            r = _lookup(ct, dt)
+            if r == (None, None, None):
+                return r
+            if r:
+                return r
+        elif mode == "corporate_and_doc_type":
+            r = _lookup("corporate", dt)
+            if r:
+                return r
+        elif mode == "third_defaults":
+            d = (CFG.get("passes", {}).get("third", {}).get("defaults", {}) or {})
             try:
-                _shutil.rmtree(tmpdir)
+                logger.info(
+                    "[routing] no route; using third_defaults → parser=%s, model=%s, extra=%s",
+                    d.get("parser_app", ""), d.get("model", "tv6"), str(d.get("extra_accuracy", True)).lower(),
+                )
             except Exception:
                 pass
+            return (d.get("parser_app", ""), d.get("model", "tv6"), str(d.get("extra_accuracy", True)).lower())
+    d = (CFG.get("passes", {}).get("third", {}).get("defaults", {}) or {})
+    try:
+        logger.info(
+            "[routing] exhausted fallbacks; using third_defaults → parser=%s, model=%s, extra=%s",
+            d.get("parser_app", ""), d.get("model", "tv6"), str(d.get("extra_accuracy", True)).lower(),
+        )
+    except Exception:
+        pass
+    return (d.get("parser_app", ""), d.get("model", "tv6"), str(d.get("extra_accuracy", True)).lower())
 
 # --- Statements Excel with progress and concurrency ---
 import re as _re
@@ -385,32 +343,34 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     # 1) First pass
     status_write("1/3 First pass — per-page OCR …")
     t0 = time.time()
-    results = _mcc_mod.call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=_mcc_mod.EXTRA_ACCURACY_FIRST)
+    results = call_fracto_parallel(
+        pdf_bytes,
+        original_filename,
+        extra_accuracy=str(CFG.get("passes", {}).get("first", {}).get("extra_accuracy", False)).lower(),
+    )
     dt0 = time.time() - t0
     progress.progress(0.33, text=f"First pass complete in {dt0:.1f}s")
     status_write(f"✓ First pass complete in {dt0:.1f}s — {len(results)} page(s)")
 
     # PDF page assembly handled by iwe_core.pdf_ops
-    def _is_true(x):
-        return str(x).strip().lower() in ("true", "1", "yes", "y")
     # 2) Select pages where has_table=true; also include pages whose headers clearly indicate a known doc type
     def _get_has_table(res: dict) -> bool:
-        field = getattr(_mcc_mod, "HAS_TABLE_FIELD", "has_table")
+        field = str(((CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}).get("has_table_field", "has_table")))
         pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
         if isinstance(pdict, list):
             for item in pdict:
                 if isinstance(item, dict) and field in item:
-                    return _is_true(item.get(field))
+                    return is_true_flag(item.get(field))
             return False
-        return _is_true(pdict.get(field))
+        return is_true_flag(pdict.get(field))
     selected_pages = [idx + 1 for idx, res in enumerate(results) if _get_has_table(res)]
     # Heuristic include: any page where header text suggests a known doc type (BS/PL/Cashflow)
     try:
-        page_texts = _mcc_mod.extract_page_texts_from_pdf_bytes(pdf_bytes)
+        page_texts = extract_page_texts_from_pdf_bytes(pdf_bytes)
         header_pages = []
         for i, txt in enumerate(page_texts, start=1):
-            inferred = _mcc_mod.infer_doc_type_from_text(txt)
-            inferred_norm = _mcc_mod.normalize_doc_type(inferred) if inferred else None
+            inferred = infer_doc_type_from_text(txt)
+            inferred_norm = normalize_doc_type(inferred) if inferred else None
             if inferred_norm and inferred_norm != "Others":
                 header_pages.append(i)
         if header_pages:
@@ -422,10 +382,18 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         selected_pages = list(range(1, len(results) + 1))
     # Optional neighbour expansion via env var (default 0 to keep strict table-only selection)
     try:
-        _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", str(getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0))))
+        _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", str(int(((CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}).get("neighbor_radius", 0))))) )
     except Exception:
-        _radius = getattr(_mcc_mod, "SELECTION_EXPAND_NEIGHBORS", 0)
-    selected_pages = _mcc_mod.expand_selected_pages(selected_pages, len(results), radius=_radius)
+        _radius = int(((CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}).get("neighbor_radius", 0)))
+    selected_pages = expand_selected_pages(selected_pages, len(results), radius=_radius)
+    # Explicitly log which pages will go to the second pass
+    try:
+        logging.getLogger(__name__).info(
+            "Second pass: re-processing %d selected pages %s",
+            len(selected_pages), selected_pages,
+        )
+    except Exception:
+        pass
 
     # Build selected.pdf
     from iwe_core.pdf_ops import build_pdf_from_pages
@@ -435,13 +403,13 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     status_write("2/3 Second pass — classifying selected pages …")
     stem = Path(original_filename).stem
     t1 = time.time()
-    sel_pdf_name = _mcc_mod.SELECTED_PDF_NAME_TMPL.format(stem=stem)
-    second_res = _mcc_mod.call_fracto(
+    sel_pdf_name = str((CFG.get("passes", {}).get("second", {}) or {}).get("selected_pdf_name", "{stem}_selected.pdf")).format(stem=stem)
+    second_res = call_fracto(
         selected_bytes,
         sel_pdf_name,
-        parser_app=_mcc_mod.SECOND_PARSER_APP_ID,
-        model=_mcc_mod.SECOND_MODEL_ID,
-        extra_accuracy=_mcc_mod.EXTRA_ACCURACY_SECOND,
+        parser_app=str((CFG.get("passes", {}).get("second", {}) or {}).get("parser_app", "")),
+        model=str((CFG.get("passes", {}).get("second", {}) or {}).get("model", "tv7")),
+        extra_accuracy=str((CFG.get("passes", {}).get("second", {}) or {}).get("extra_accuracy", False)).lower(),
     )
     dt1 = time.time() - t1
     progress.progress(0.55, text=f"Second pass complete in {dt1:.1f}s")
@@ -462,23 +430,47 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         if not isinstance(item, dict):
             continue
         main_dt = item.get("doc_type") or item.get("Document_type")
-        has_two = str(item.get("has_two") or item.get("Has_multiple_sections") or "").strip().lower() in ("true","1","yes","y","on")
+            has_two = is_true_flag(item.get("has_two") or item.get("Has_multiple_sections"))
         second_dt = item.get("second_doc_type") or item.get("Second_doc_type")
         norm_class.append({
             "page_number": int(item.get("page_number") or i),
             "doc_type": main_dt,
             "has_two": "true" if has_two else "",
             "second_doc_type": second_dt,
-            "is_continuation": "true" if str(item.get("is_continuation") or "").lower() == "true" else "",
+            "is_continuation": "true" if is_true_flag(item.get("is_continuation")) else "",
             "continuation_of": item.get("continuation_of"),
         })
     classification = norm_class
 
+    # Log the raw second-pass classification for visibility
+    try:
+        _dbg_cls = [
+            {
+                "page_number": int(it.get("page_number") or idx),
+                "doc_type": it.get("doc_type") or it.get("Document_type"),
+                "second_doc_type": it.get("second_doc_type") or it.get("Second_doc_type"),
+            "has_two": is_true_flag(it.get("has_two") or it.get("Has_multiple_sections")),
+            }
+            for idx, it in enumerate(classification, start=1)
+            if isinstance(it, dict)
+        ]
+        logging.getLogger(__name__).info("[routing] second-pass classification (raw) → %s", _dbg_cls)
+    except Exception:
+        pass
+
     # Company type for routing (from second pass, with normalisation)
     org_type_raw = None
     if isinstance(pd_payload, dict):
-        org_type_raw = (pd_payload.get("organisation_type") or {}).get("type")
-    company_type = _mcc_mod.normalize_company_type(org_type_raw)
+        try:
+            # Prefer explicit 'organisation_type.type' if present
+            org_type_raw = (pd_payload.get("organisation_type") or {}).get("type")
+            if org_type_raw is not None:
+                logging.getLogger(__name__).debug("[routing] organisation_type found via default path 'organisation_type.type': %r", org_type_raw)
+            else:
+                logging.getLogger(__name__).debug("[routing] organisation_type.type missing in payload; will use default company_type if needed")
+        except Exception:
+            pass
+    company_type = normalize_company_type(org_type_raw)
     logging.getLogger(__name__).info("Routing company_type: %s (raw=%r)", company_type, org_type_raw)
 
     if not classification:
@@ -492,13 +484,51 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         status_write("⚠️ Could not derive classification — aborting third pass.")
         return None
 
+    # Show mapping from selected-page index to original page number with labels
+    try:
+        _map = []
+        for it in classification:
+            sel_no = int((it or {}).get("page_number") or 0)
+            if sel_no <= 0:
+                continue
+            if 1 <= sel_no <= len(selected_pages):
+                orig_p = selected_pages[sel_no - 1]
+            else:
+                continue
+            main = normalize_doc_type((it or {}).get("doc_type") or (it or {}).get("continuation_of"))
+            sec  = normalize_doc_type((it or {}).get("second_doc_type") or "")
+            flags = []
+            if is_true_flag((it or {}).get("is_continuation")):
+                flags.append("cont")
+            if is_true_flag((it or {}).get("has_two")) or is_true_flag((it or {}).get("Has_multiple_sections")):
+                flags.append("has_two")
+            lab = main or "Others"
+            if sec and sec != "Others" and sec != lab:
+                lab = f"{lab} + {sec}"
+            if flags:
+                lab = f"{lab} ({','.join(flags)})"
+            _map.append(f"{sel_no}→{orig_p}:{lab}")
+        if _map:
+            logging.getLogger(__name__).info("Second-pass mapping (sel→orig:label) → %s", "; ".join(_map))
+    except Exception:
+        pass
+
     # 5) Group pages by doc_type (robust: classification + header heuristics + smoothing)
-    groups = _mcc_mod.build_groups(
+    groups = build_groups(
         selected_pages, classification, pdf_bytes, first_pass_results=results
     )
     if not groups:
         status_write("⚠️ No groups found after classification.")
         return None
+
+    # Log a one-line summary of all groups with page ranges
+    try:
+        _summary = "; ".join(
+            f"{dt}: {format_ranges(sorted(pages))}" for dt, pages in sorted(groups.items())
+        )
+        logging.getLogger(__name__).info("[groups] Third pass groups → %s", _summary)
+    except Exception:
+        pass
 
     n_groups = len(groups)
     status_write(f"3/3 Third pass — {n_groups} document type(s): {sorted(groups.keys())}")
@@ -510,14 +540,20 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     completed = 0
     total = n_groups
 
-    with ThreadPoolExecutor(max_workers=min(_mcc_mod.MAX_PARALLEL, n_groups)) as pool:
+    max_parallel = int((CFG.get("concurrency", {}) or {}).get("max_parallel", 9))
+    with ThreadPoolExecutor(max_workers=min(max_parallel, n_groups)) as pool:
         futures = {}
         for doc_type, page_list in groups.items():
             page_list = sorted(page_list)
             from iwe_core.pdf_ops import build_pdf_from_pages
             group_bytes = build_pdf_from_pages(pdf_bytes, page_list)
 
-            parser_app, model_id, extra_acc = _mcc_mod._resolve_routing(doc_type, company_type=company_type)
+            # Show the final routing keys we are about to use
+            logging.getLogger(__name__).info(
+                "[routing] inputs: ct_raw=%r ct=%s doc_raw=%r doc_norm=%s key=%s",
+                org_type_raw, company_type, doc_type, doc_type, f"{company_type}/{doc_type.lower()}",
+            )
+            parser_app, model_id, extra_acc = _resolve_routing(doc_type, company_type=company_type)
             if parser_app is None:
                 routing_used[doc_type] = {"parser_app": None, "model": None, "extra": None, "company_type": company_type, "skipped": True, "reason": "disabled"}
                 logging.getLogger(__name__).info(
@@ -532,9 +568,9 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
             )
 
             _slug = doc_type.lower().replace(' ', '_').replace('&','and').replace('/','_')
-            _group_pdf_name = _mcc_mod.CFG.get("export", {}).get("filenames", {}).get("group_pdf", "{stem}_{slug}.pdf").format(stem=stem, slug=_slug)
+            _group_pdf_name = CFG.get("export", {}).get("filenames", {}).get("group_pdf", "{stem}_{slug}.pdf").format(stem=stem, slug=_slug)
             futures[pool.submit(
-                _mcc_mod.call_fracto,
+                call_fracto,
                 group_bytes,
                 _group_pdf_name,
                 parser_app=parser_app,
@@ -597,7 +633,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 progress.progress(0.55 + 0.40 * (completed / total), text=f"Third pass {completed}/{total}: {doc_type}")
 
             parsed = group_res.get("data", {}).get("parsedData", [])
-            rows_list = _mcc_mod._extract_rows(parsed)
+            rows_list = _extract_rows(parsed)
             if rows_list:
                 all_keys = []
                 for row in rows_list:
@@ -606,7 +642,7 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                             all_keys.append(k)
                 rows = [{k: r.get(k, "") for k in all_keys} for r in rows_list]
                 df_ = pd.DataFrame(rows, columns=all_keys)
-                df_ = _mcc_mod.sanitize_statement_df(doc_type, df_)
+                df_ = sanitize_statement_df(doc_type, df_)
                 # Preserve LLM order; only reorder when explicitly enabled
                 try:
                     import os as _os
@@ -629,12 +665,12 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         tmp_pdf_path.write_bytes(pdf_bytes)
 
         # Provide pages mapping so the writer can infer BS headers from PDF if periods are missing
-        json_name_tmpl = _mcc_mod.CFG.get("export", {}).get("combined_json", {}).get("filename", "{stem}_statements.json")
+        json_name_tmpl = CFG.get("export", {}).get("combined_json", {}).get("filename", "{stem}_statements.json")
         combined_obj = {"documents": {dt: {"pages": groups.get(dt, [])} for dt in groups}}
         (tmpdir / json_name_tmpl.format(stem=stem)).write_text(_json.dumps(combined_obj), encoding="utf-8")
 
         # Call the shared writer; it returns the xlsx path
-        xlsx_out = _mcc_mod._write_statements_workbook(
+        xlsx_out = _write_statements_workbook(
             str(tmp_pdf_path),
             stem,
             combined_sheets,
@@ -1041,7 +1077,7 @@ if run:
             excel_bytes = buffer.getvalue()
             final_name = f"{base_name}_ocr.xlsx"
         else:
-            _tmpl = _mcc_mod.CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
+            _tmpl = CFG.get("export", {}).get("filenames", {}).get("statements_xlsx", "{stem}_statements.xlsx")
             final_name = _tmpl.format(stem=base_name)
 
         progress.progress(1.0, text="Done!")
