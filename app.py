@@ -688,6 +688,69 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
                 xlsx_bytes = Path(xlsx_out).read_bytes()
         except Exception:
             xlsx_bytes = Path(xlsx_out).read_bytes()
+
+        # Post-process headers: rename c1,c2,… to period labels if available
+        try:
+            if periods_hint:
+                from openpyxl import load_workbook
+                import re as _re
+                wb = load_workbook(io.BytesIO(xlsx_bytes))
+                def _labels_for(name: str):
+                    # exact match, then case-insensitive, else best by size
+                    if name in periods_hint:
+                        return periods_hint[name]
+                    name_l = str(name).strip().lower()
+                    for k, v in periods_hint.items():
+                        try:
+                            if str(k).strip().lower() == name_l:
+                                return v
+                        except Exception:
+                            continue
+                    # fallback: pick the mapping with max labels
+                    best_k, best_v, best_n = None, None, 0
+                    for k, v in periods_hint.items():
+                        try:
+                            n = len(v or {})
+                            if n > best_n:
+                                best_k, best_v, best_n = k, v, n
+                        except Exception:
+                            continue
+                    return best_v
+                for ws in wb.worksheets:
+                    sname = ws.title
+                    if sname.strip().lower() in {"routing summary", "validation"}:
+                        continue
+                    labels_map = _labels_for(sname) or {}
+                    if not labels_map:
+                        continue
+                    # Build rename list
+                    has_indexed = any(_re.fullmatch(r"(?i)[cp]\\d+", str(k)) for k in labels_map.keys())
+                    next_labels = None
+                    if not has_indexed:
+                        # deterministic order from mapping values
+                        next_labels = [str(v) for v in labels_map.values() if str(v).strip() != ""]
+                    max_col = ws.max_column
+                    # Walk header row
+                    c_idx = 1
+                    for col in range(1, max_col + 1):
+                        cell = ws.cell(row=1, column=col)
+                        hdr = str(cell.value or "")
+                        m = _re.fullmatch(r"(?i)c(\\d+)", hdr.strip())
+                        if m:
+                            if has_indexed:
+                                num = m.group(1)
+                                key = f"c{num}"; alt = f"p{num}"
+                                label = (labels_map.get(key) or labels_map.get(alt) or "").strip()
+                                if label:
+                                    cell.value = label
+                            elif next_labels and c_idx <= len(next_labels):
+                                cell.value = next_labels[c_idx - 1]
+                                c_idx += 1
+                outb = io.BytesIO()
+                wb.save(outb)
+                xlsx_bytes = outb.getvalue()
+        except Exception:
+            pass
         progress.progress(1.0, text=f"All done in {time.time()-t_overall:.1f}s")
         status_write("✅ Excel ready to download.")
         return xlsx_bytes

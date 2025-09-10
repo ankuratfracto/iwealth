@@ -59,6 +59,22 @@ def _unit_multiplier(unit: str | None) -> Tuple[str | None, float]:
     return key, mul
 
 
+def _walk_strings(node: Any, out: List[str], depth: int = 0, max_items: int = 500) -> None:
+    if len(out) >= max_items:
+        return
+    if isinstance(node, str):
+        s = node.strip()
+        if s:
+            out.append(s)
+        return
+    if isinstance(node, dict):
+        for v in node.values():
+            _walk_strings(v, out, depth + 1, max_items)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_strings(v, out, depth + 1, max_items)
+
+
 def detect_units_and_currency(pd_payload: dict | None, rows: List[dict] | None) -> Dict[str, Any]:
     """Detect currency symbol and unit keyword from payload/rows text.
 
@@ -83,6 +99,12 @@ def detect_units_and_currency(pd_payload: dict | None, rows: List[dict] | None) 
                 v = r.get(k)
                 if isinstance(v, str):
                     texts.append(v)
+    except Exception:
+        pass
+
+    # 3) As a last resort, walk the payload recursively and collect strings
+    try:
+        _walk_strings(pd_payload or {}, texts, max_items=800)
     except Exception:
         pass
 
@@ -157,19 +179,62 @@ def _parse_period_label(label: str) -> Tuple[date | None, str | None, str | None
         return None, None, None, None
     sl = s.lower()
 
-    # 1) Explicit quarter tokens
-    m = re.search(r"\bq([1-4])\b.*?(fy|fy\s*\d{2,4}|\d{4})", sl)
+    # Helper to parse any explicit date first (we'll still set freq based on wording)
+    def _extract_any_date(s: str) -> date | None:
+        m1 = re.search(r"(\d{1,2})[-./\s]*(\w{3,9})[-./\s]*(\d{2,4})", s)
+        if m1:
+            d = int(m1.group(1)); mm = _MONTHS.get(m1.group(2)[:3], None); yr = int(m1.group(3)); yr = 2000 + yr if yr < 100 else yr
+            if mm:
+                try:
+                    return date(yr, mm, min(d, 31))
+                except Exception:
+                    return None
+        m2 = re.search(r"(\w{3,9})\s*(\d{1,2}),?\s*(\d{4})", s)
+        if m2:
+            mm = _MONTHS.get(m2.group(1)[:3].lower(), None); d = int(m2.group(2)); yr = int(m2.group(3))
+            if mm:
+                try:
+                    return date(yr, mm, min(d, 31))
+                except Exception:
+                    return None
+        return None
+
+    # 1) Year-ended statements
+    if "year ended" in sl or "for the year ended" in sl:
+        dt = _extract_any_date(sl)
+        if dt is None:
+            # Try to pick year from text; assume Mar 31
+            m = re.search(r"\b(20\d{2})\b", sl)
+            if m:
+                yy = int(m.group(1)); dt = date(yy, 3, 31)
+        if dt:
+            fy = f"FY{str(dt.year)[-2:]}"
+            return dt, "annual", None, fy
+
+    # 2) Quarter-ended / three months ended
+    if ("quarter ended" in sl) or ("three months ended" in sl) or ("3 months ended" in sl):
+        dt = _extract_any_date(sl)
+        if dt:
+            # Map month to Indian FY quarter
+            # FY ends in March (3): Q1=Apr-Jun(6), Q2=Jul-Sep(9), Q3=Oct-Dec(12), Q4=Jan-Mar(3)
+            m = dt.month
+            if m in (4,5,6):
+                q = 1; fy_end = dt.year
+            elif m in (7,8,9):
+                q = 2; fy_end = dt.year
+            elif m in (10,11,12):
+                q = 3; fy_end = dt.year
+            else:  # Jan-Mar
+                q = 4; fy_end = dt.year
+            return dt, "quarter", f"Q{q}", f"FY{str(fy_end)[-2:]}"
+
+    # 3) Explicit quarter tokens like Q1 FY24
+    m = re.search(r"\bq([1-4])\b.*?(fy\s*(\d{2,4})|(\d{4}))", sl)
     if m:
         q = int(m.group(1))
-        # Extract year: try FY24 style first
-        m2 = re.search(r"fy\s*(\d{2,4})", sl)
-        year = None
-        if m2:
-            yy = int(m2.group(1))
-            year = 2000 + yy if yy < 100 else yy
-        else:
-            m3 = re.search(r"(\d{4})", sl)
-            year = int(m3.group(1)) if m3 else None
+        # Extract FY year end
+        yy = m.group(3) or m.group(4)
+        year = 2000 + int(yy) if yy and len(yy) == 2 else (int(yy) if yy else None)
         # Assume Indian FY ends in March → quarter end months: Q1:Jun, Q2:Sep, Q3:Dec, Q4:Mar
         if year:
             month = [None, 6, 9, 12, 3][q]
@@ -185,32 +250,12 @@ def _parse_period_label(label: str) -> Tuple[date | None, str | None, str | None
             dd = date(cal_year, month, day)
             return dd, "quarter", f"Q{q}", f"FY{str(fy_end)[-2:]}"
 
-    # 2) Day-Month-Year variants
-    m = re.search(r"(\d{1,2})[-./\s]*(\w{3,9})[-./\s]*(\d{2,4})", sl)
-    if m:
-        d = int(m.group(1))
-        mm = _MONTHS.get(m.group(2)[:3], None)
-        yr = int(m.group(3))
-        yr = 2000 + yr if yr < 100 else yr
-        if mm:
-            try:
-                return date(yr, mm, min(d, 31)), None, None, None
-            except Exception:
-                pass
+    # 4) Standalone date variants (no freq wording)
+    dt = _extract_any_date(sl)
+    if dt:
+        return dt, None, None, None
 
-    # 3) Month Day, Year
-    m = re.search(r"(\w{3,9})\s*(\d{1,2}),?\s*(\d{4})", sl)
-    if m:
-        mm = _MONTHS.get(m.group(1)[:3].lower(), None)
-        d = int(m.group(2))
-        yr = int(m.group(3))
-        if mm:
-            try:
-                return date(yr, mm, min(d, 31)), None, None, None
-            except Exception:
-                pass
-
-    # 4) Year only (annual)
+    # 5) Year only (annual)
     m = re.search(r"\b(20\d{2})\b", sl)
     if m and ("year" in sl or "annual" in sl):
         yr = int(m.group(1))
@@ -247,6 +292,31 @@ def build_period_index(labels_by_id: Dict[str, str]) -> Dict[str, Any]:
             fy_end = Counter(months).most_common(1)[0][0]
         except Exception:
             fy_end = 3
+    # Fill missing freq/FY/FQ when we have end_date
+    for cid, meta in out_by_id.items():
+        if meta.get("end_date") and not meta.get("freq"):
+            try:
+                y, m, d = map(int, str(meta["end_date"]).split("-")[:3])
+                # Heuristic: March year-end → annual if month == fy_end
+                if m == int(fy_end):
+                    meta["freq"] = "annual"
+                    meta["fiscal_year"] = f"FY{str(y)[-2:]}"
+                # Else, mark as point-in-time (Balance Sheet interim) if not quarterly wording
+                else:
+                    meta["freq"] = meta.get("freq") or "point"
+            except Exception:
+                pass
+        # If we know end_date and freq=quarter, derive quarter tag when missing
+        if meta.get("end_date") and meta.get("freq") == "quarter" and not meta.get("fiscal_quarter"):
+            try:
+                y, m, d = map(int, str(meta["end_date"]).split("-")[:3])
+                if m in (4,5,6):   meta["fiscal_quarter"] = "Q1"; fy = y
+                elif m in (7,8,9): meta["fiscal_quarter"] = "Q2"; fy = y
+                elif m in (10,11,12): meta["fiscal_quarter"] = "Q3"; fy = y
+                else: meta["fiscal_quarter"] = "Q4"; fy = y
+                meta["fiscal_year"] = meta.get("fiscal_year") or f"FY{str(fy)[-2:]}"
+            except Exception:
+                pass
     return {"by_id": out_by_id, "fiscal_year_end_month": int(fy_end)}
 
 
@@ -445,4 +515,3 @@ __all__ = [
     "quality_flags",
     "extract_footnote_refs",
 ]
-
