@@ -43,7 +43,7 @@ passes:
   second:
     parser_app: "pDJoI1nbLM6TvD5u"     # second-pass (selected.pdf) classifier
     model: "gv1"
-    extra_accuracy: false
+    extra_accuracy: true
     save_selected_json: true
     selected_json_name: "{stem}_selected_ocr.json"
     selected_pdf_name:  "{stem}_selected.pdf"
