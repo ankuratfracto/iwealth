@@ -209,13 +209,13 @@ routing:                                # per (company_type × doc_type)
   # instead of falling back to a different parser.
   skip_on_disabled: true
   non financial company:
-    consolidated balance sheet:             { parser: "XFwWYNUdotDizRAK", model: "tv6", extra: true, enable: true }
+    consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
     # done
-    standalone balance sheet:               { parser: "XFwWYNUdotDizRAK", model: "tv6", extra: true, enable: true }
+    standalone balance sheet:               { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
     # done
-    consolidated profit and loss statement: { parser: "t8uyJ0fuqBdZes70", model: "tv6", extra: true, enable: true } # 1hh51mG0tc3z4hYC
+    consolidated profit and loss statement: { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true } # 1hh51mG0tc3z4hYC
     # done
-    standalone profit and loss statement:   { parser: "t8uyJ0fuqBdZes70", model: "tv6", extra: true, enable: true }
+    standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
     # done
     consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: false }
     # done
