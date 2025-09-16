@@ -49,7 +49,7 @@ passes:
   filter:
     enable: true                  # turn off to skip quick pruning
     parser_app: "pDJoI1nbLM6TvD5u"   # reuse the classifier; set your nano/light parserApp if different
-    model: "tv6"                 # set the tiny model you have (fallbacks to your config if unavailable)
+    model: "gv2"                 # set the tiny model you have (fallbacks to your config if unavailable)
     extra_accuracy: false
     min_pages_to_run: 6           # only run this filter if ≥ N pages are selected
     keep_if_has_two: true         # always keep mixed pages
@@ -64,7 +64,7 @@ passes:
   third:
     defaults:
       parser_app: "qbE1jBS40EtBRvvx"   # default if routing has no match (generic corporate BS parser)
-      model: "tv6"
+      model: "gv2"
       extra_accuracy: false
     # Retry plan if a group's validation fails
     on_validation_failure:
@@ -207,43 +207,45 @@ routing:                                # per (company_type × doc_type)
   # instead of falling back to a different parser.
   skip_on_disabled: true
   non financial company:
-    consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
+    consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "gv2", extra: true, enable: true }
     # done
-    standalone balance sheet:               { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
+    standalone balance sheet:               { parser: "qbE1jBS40EtBRvvx", model: "gv2", extra: true, enable: true }
     # done
-    consolidated profit and loss statement: { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
+    consolidated profit and loss statement: { parser: "1hh51mG0tc3z4hYC", model: "gv2", extra: true, enable: true }
     # done
-    standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
+    standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "gv2", extra: true, enable: true }
     # done
-    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "gv2", extra: true, enable: true }
     # done
-    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "gv2", extra: true, enable: true }
     # done
   corporate:
-    consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
+    consolidated balance sheet:             { parser: "qbE1jBS40EtBRvvx", model: "gv2", extra: true, enable: true }
     # done
-    standalone balance sheet:               { parser: "qbE1jBS40EtBRvvx", model: "tv6", extra: true, enable: true }
+    standalone balance sheet:               { parser: "qbE1jBS40EtBRvvx", model: "gv2", extra: true, enable: true }
     # done
-    consolidated profit and loss statement: { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
+    consolidated profit and loss statement: { parser: "1hh51mG0tc3z4hYC", model: "gv2", extra: true, enable: true }
     # done
-    standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
+    standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "gv2", extra: true, enable: true }
     # done
-    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "gv2", extra: true, enable: true }
     # done
-    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "gv2", extra: true, enable: true }
     # done
   bank:
-    consolidated balance sheet:             { parser: "JZRkn5y0kkSmABvy", model: "tv6", extra: true, enable: true }
+    consolidated balance sheet:             { parser: "JZRkn5y0kkSmABvy", model: "gv2", extra: true, enable: true }
     # done
-    standalone balance sheet:               { parser: "JZRkn5y0kkSmABvy", model: "tv6", extra: true, enable: true }
+    standalone balance sheet:               { parser: "JZRkn5y0kkSmABvy", model: "gv2", extra: true, enable: true }
     # done
-    consolidated profit and loss statement: { parser: "5o14rnboPfr82BG9", model: "tv6", extra: true, enable: true }
+    consolidated profit and loss statement: { parser: "5o14rnboPfr82BG9", model: "gv2", extra: true, enable: true }
+    #consolidated profit and loss statement: { parser: "CPzQ1VdyXs6NjIil", model: "gv1", extra: false, enable: true } # for testing only
     # done
-    standalone profit and loss statement:   { parser: "5o14rnboPfr82BG9", model: "tv6", extra: true, enable: true }
+    standalone profit and loss statement:   { parser: "5o14rnboPfr82BG9", model: "gv2", extra: true, enable: true }
+    #standalone profit and loss statement:   { parser: "CPzQ1VdyXs6NjIil", model: "gv1", extra: false, enable: true } # for testing only
     # done
-    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "gv2", extra: true, enable: true }
     # done
-    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "gv2", extra: true, enable: true }
     # done
   nbfc: {}
   insurance: {}

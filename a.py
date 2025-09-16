@@ -64,6 +64,7 @@ import io
 # use top-level sys import
 import json
 import time
+from typing import Dict
 import logging
 # from pathlib import Path  # already imported above
  
@@ -188,6 +189,16 @@ _ROUTING_FALLBACK_ORDER = _ROUTING_CFG.get("fallback_order", ["company_type_and_
 _ROUTING_ALLOWED_PARSERS = set((_ROUTING_CFG.get("allowed_parsers") or []) or [])
 _ROUTING_BLOCKED_PARSERS = set((_ROUTING_CFG.get("blocked_parsers") or []) or [])
 _ROUTING_SKIP_ON_DISABLED = bool(_ROUTING_CFG.get("skip_on_disabled", False))
+
+# ─── Timing helpers ───────────────────────────────────────────────────────
+def _fmt_ts(ts: float) -> str:
+    """Format epoch seconds into a human-readable timestamp honoring logging.utc."""
+    try:
+        use_utc = bool((CFG.get("logging") or {}).get("utc", False))
+    except Exception:
+        use_utc = False
+    t = time.gmtime(ts) if use_utc else time.localtime(ts)
+    return time.strftime("%Y-%m-%d %H:%M:%S", t)
 
 # ─── Generic JSON access & criteria helpers (config‑driven) ─────────────
 TRUTHY_SET = {str(x).strip().lower() for x in (CFG.get("truthy_values") or ["true","1","yes","y","on"])}
@@ -1235,15 +1246,17 @@ def _cli():
         sys.exit(3)
 
     # Timing variables
-    overall_start = time.time()
+    timings: Dict[str, Dict[str, float]] = {}
+    overall_start = time.time(); timings["overall"] = {"start": overall_start}
     first_pass_time = 0.0
     second_pass_time = 0.0
     third_pass_time = 0.0
 
     # 1️⃣ First‑pass OCR (page‑level classification)
-    _t0 = time.time()
+    first_pass_start = time.time(); _t0 = first_pass_start
     results = process_pdf(pdf_path)
-    first_pass_time = time.time() - _t0
+    first_pass_end = time.time(); first_pass_time = first_pass_end - _t0
+    timings["first_pass"] = {"start": first_pass_start, "end": first_pass_end, "dur": first_pass_time}
     # If every chunk failed (e.g., 403), abort with guidance
 
 
@@ -1437,7 +1450,7 @@ def _cli():
         stem = Path(pdf_path).stem
         sel_pdf_name = SELECTED_PDF_NAME_TMPL.format(stem=stem)
 
-        _t1 = time.time()
+        second_pass_start = time.time(); _t1 = second_pass_start
         if SECOND_COMBINE_PAGES:
             # Combine selected pages into one selected.pdf
             selected_bytes = build_pdf_from_pages(orig_bytes, selected_pages)
@@ -1529,7 +1542,8 @@ def _cli():
                 logger.info("Second-pass (per-page) results written to %s", selected_json_path)        
         
 
-        second_pass_time = time.time() - _t1
+        second_pass_end = time.time(); second_pass_time = second_pass_end - _t1
+        timings["second_pass"] = {"start": second_pass_start, "end": second_pass_end, "dur": second_pass_time}
         # 6️⃣ Save second JSON as configured
         if SAVE_SELECTED_JSON:
             selected_json_path = Path(str(pdf_p)).with_name(SELECTED_JSON_NAME_TMPL.format(stem=stem))
@@ -1538,6 +1552,7 @@ def _cli():
             logger.info("Second-pass results written to %s", selected_json_path)
 
         # 7️⃣  Third pass – group pages by doc_type and process each group separately
+        third_pass_start = time.time(); timings["third_pass"] = {"start": third_pass_start}
         # Robustly handle dict/list shaped parsedData from second pass
         pd_payload = (second_res.get("data", {}) or {}).get("parsedData", {})
         org_type_raw = _second_pass_org_type(pd_payload)
@@ -1645,6 +1660,7 @@ def _cli():
                     logger.info("[groups] Third pass groups → %s", _summary)
                 except Exception:
                     pass
+                # Start timing of group processing (already included in third_pass start)
                 _t2 = time.time()
                 logger.info("Third pass: processing %d doc_type groups → %s", len(groups), sorted(groups.keys()))
 
@@ -1836,7 +1852,8 @@ def _cli():
                 except Exception as exc:
                     logger.error("Failed to write combined Excel workbook: %s", exc)
                 finally:
-                    third_pass_time = time.time() - _t2
+                    # Keep local sub-phase metric but overall third_pass_time computed later
+                    pass
     
 
             else:
@@ -1881,12 +1898,61 @@ def _cli():
             if excel_out:
                 excel_ops.write_excel_from_ocr(results, excel_out, overrides)
 
-            # Timing summary
-            total_time = time.time() - overall_start
-            logger.info(
-                "Timing summary → First pass: %.2fs | Second pass: %.2fs | Third pass: %.2fs | Total: %.2fs",
-                first_pass_time, second_pass_time, third_pass_time, total_time
-            )
+            # Timing summary (per pass and overall, with start/end timestamps)
+            overall_end = time.time(); timings["overall"]["end"] = overall_end; timings["overall"]["dur"] = overall_end - overall_start
+            # Compute third pass duration from its start to now (covers all branches)
+            if "third_pass" in timings and "start" in timings["third_pass"]:
+                third_pass_time = overall_end - timings["third_pass"]["start"]
+                timings["third_pass"]["end"] = overall_end
+                timings["third_pass"]["dur"] = third_pass_time
+            else:
+                third_pass_time = 0.0
+
+            # Emit detailed timing lines
+            try:
+                logger.info(
+                    "First pass: %.2fs (%s → %s)",
+                    first_pass_time,
+                    _fmt_ts(timings["first_pass"]["start"]),
+                    _fmt_ts(timings["first_pass"]["end"]),
+                )
+                logger.info(
+                    "Second pass: %.2fs (%s → %s)",
+                    second_pass_time,
+                    _fmt_ts(timings["second_pass"]["start"]),
+                    _fmt_ts(timings["second_pass"]["end"]),
+                )
+                logger.info(
+                    "Third pass: %.2fs (%s → %s)",
+                    third_pass_time,
+                    _fmt_ts(timings["third_pass"].get("start", overall_start)),
+                    _fmt_ts(timings["third_pass"].get("end", overall_end)),
+                )
+                logger.info(
+                    "Total: %.2fs (%s → %s)",
+                    timings["overall"]["dur"],
+                    _fmt_ts(timings["overall"]["start"]),
+                    _fmt_ts(timings["overall"]["end"]),
+                )
+            except Exception:
+                pass
+
+            # One-line compact summary for print logs
+            try:
+                print(
+                    "[Timing] First: %.2fs | Second: %.2fs | Third: %.2fs | Total: %.2fs" % (
+                        first_pass_time, second_pass_time, third_pass_time, timings["overall"]["dur"]
+                    ),
+                    flush=True,
+                )
+                print(
+                    "[Timing] Overall window: %s → %s" % (
+                        _fmt_ts(timings["overall"]["start"]), _fmt_ts(timings["overall"]["end"])
+                    ),
+                    flush=True,
+                )
+            except Exception:
+                pass
 
 
 
