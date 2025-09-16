@@ -239,7 +239,7 @@ routing:                                # per (company_type × doc_type)
     # done
     standalone balance sheet:               { parser: "JZRkn5y0kkSmABvy", model: "tv6", extra: true, enable: true } # JZRkn5y0kkSmABvy latest working id
     # done
-    consolidated profit and loss statement: { parser: "5o14rnboPfr82BG9", model: "tv6", extra: true, enable: true }
+    consolidated profit and loss statement: { parser: "45iTjJU1BzL6qSWF", model: "tv6", extra: true, enable: true }
     #consolidated profit and loss statement: { parser: "CPzQ1VdyXs6NjIil", model: "tv6", extra: true, enable: true } # for testing only
     # done
     standalone profit and loss statement:   { parser: "5o14rnboPfr82BG9", model: "tv6", extra: true, enable: true }
