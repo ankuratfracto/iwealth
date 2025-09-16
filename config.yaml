@@ -230,9 +230,9 @@ routing:                                # per (company_type × doc_type)
     # done
     standalone profit and loss statement:   { parser: "1hh51mG0tc3z4hYC", model: "tv6", extra: true, enable: true }
     # done
-    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: false }
     # done
-    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: true }
+    standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "tv6", extra: true, enable: false }
     # done
   bank:
     consolidated balance sheet:             { parser: "JZRkn5y0kkSmABvy", model: "tv6", extra: true, enable: true }
