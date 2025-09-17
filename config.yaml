@@ -85,9 +85,18 @@ passes:
       model: "gv1"
       extra_accuracy: false
     # Retry plan if a group's validation fails
+    validation:
+      enable: true
+      retry:
+        enable: true
+        max_attempts: 2
+        plan:
+          - { extra_accuracy: true }
+      report:
+        enable: true
+        filename: "{stem}_validation_report.json"
     on_validation_failure:
       retries:
-        - { extra_accuracy: true }     # re-run with extra accuracy
         - { alternate_parser: true }   # try next parser in routing for that (company_type, doc_type)
         - { fallback_company_type: "corporate" }  # last-resort generic
     combine_pages: true
@@ -301,6 +310,57 @@ validation:
     million: 0.01
     lakh: 1
     thousand: 10
+  statement_quality:
+    enable: true
+    min_rows:
+      balance_sheet: 10
+      profit_and_loss: 25
+    column_requirements:
+      balance_sheet:
+        required: ["c1", "c2"]
+        min_fill_ratio_pct: 80
+      profit_and_loss:
+        required: ["c1", "c2", "c3", "c4"]
+        min_fill_ratio_pct: 80
+    min_numeric_density_pct: 40
+    max_blank_particulars_pct: 15
+    max_duplicate_particulars_pct: 15
+    required_patterns:
+      balance_sheet:
+        - "^\\s*total\\s*assets\\b"
+        - "^\\s*total\\s*equity\\s*and\\s*liabilit(?:y|ies)\\b"
+      profit_and_loss:
+        - "^\\s*total\\s*income\\b"
+        - "^\\s*total\\s*expenditure\\b"
+        - "^\\s*profit.*before.*tax\b"
+        - "^\\s*profit.*after.*tax\b"
+    arithmetic:
+      enable: true
+      profit_and_loss:
+        - name: total_income_components
+          target: "^\\s*total\\s*income\\b"
+          components:
+            - "^\\s*revenue\\s*from\\s*operations\\b"
+            - "^\\s*other\\s*income\\b"
+          tolerance_pct: 2.0
+        - name: profit_after_tax
+          target: "^\\s*profit.*after.*tax\\b"
+          minuend: "^\\s*profit.*before.*tax\\b"
+          subtrahend: "^\\s*tax\\s*expense\\b"
+          tolerance_pct: 2.5
+      balance_sheet:
+        - name: assets_vs_equity_liabilities
+          lhs: "^\\s*total\\s*assets\\b"
+          rhs:
+            - "^\\s*total\\s*equity\\b"
+            - "^\\s*total\\s*liabilit(?:y|ies)\\b"
+          tolerance_pct: 1.5
+    period_labels:
+      enable: true
+      require_column_count_match: true
+      min_labels:
+        balance_sheet: 2
+        profit_and_loss: 4
   checks:
     balance_sheet:
       enforce_equation: true         # Assets ≈ Equity + Liabilities

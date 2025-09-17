@@ -8,7 +8,7 @@ provides routing fallbacks and small utilities used by the pipeline.
 
 from __future__ import annotations
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Iterable, Sequence, Callable
 from pathlib import Path
 import io, json, time, logging, os, re, sys
 
@@ -276,6 +276,121 @@ def _coerce_number_like(x):
         return -v if neg else v
     except Exception:
         return None
+
+
+def _row_type_value(df, type_series, idx: int) -> str:
+    """Best-effort row_type lookup used by component expansion helpers."""
+    if type_series is not None:
+        getter = getattr(type_series, "get", None)
+        if callable(getter):
+            try:
+                return str(getter(idx, "")).strip().lower()
+            except Exception:
+                pass
+        try:
+            return str(type_series.iloc[idx]).strip().lower()  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                return str(type_series[idx]).strip().lower()
+            except Exception:
+                pass
+    try:
+        return str(df.at[idx, "row_type"]).strip().lower()
+    except Exception:
+        return ""
+
+
+def _make_row_type_lookup(df, type_series) -> Callable[[int], str]:
+    def _lookup(idx: int) -> str:
+        return _row_type_value(df, type_series, idx)
+
+    return _lookup
+
+
+def _expand_component_ids(
+    ids: Iterable[str] | None,
+    *,
+    id_map: Dict[str, int],
+    children_of: Dict[str, list[str]],
+    row_type_lookup: Callable[[int], str] | None = None,
+    item_markers: Iterable[str] | None = None,
+    include_self_on_leaf: bool = True,
+    include_self_when_children: bool = False,
+) -> list[int]:
+    """Expand component IDs into row indices while preserving original order."""
+    markers = {str(m).strip().lower() for m in (item_markers or ("item", "line")) if str(m).strip()}
+
+    def _is_item(idx: int) -> bool:
+        if row_type_lookup is None:
+            return False
+        try:
+            return row_type_lookup(idx) in markers
+        except Exception:
+            return False
+
+    visited_ids: set[str] = set()
+    ordered: list[int] = []
+    seen_idx: set[int] = set()
+
+    def _append(idx: int) -> None:
+        if idx not in seen_idx:
+            seen_idx.add(idx)
+            ordered.append(idx)
+
+    def _walk(raw_id: str) -> None:
+        if not raw_id:
+            return
+        if raw_id in visited_ids:
+            return
+        visited_ids.add(raw_id)
+        idx = id_map.get(raw_id)
+        if idx is not None and _is_item(idx):
+            _append(idx)
+            return
+        children = children_of.get(raw_id) or []
+        if children:
+            for child in children:
+                _walk(str(child).strip())
+            if idx is not None and include_self_when_children:
+                _append(idx)
+        else:
+            if idx is not None and include_self_on_leaf:
+                _append(idx)
+
+    for comp_id in ids or []:
+        _walk(str(comp_id).strip())
+
+    return ordered
+
+
+def _solve_signs(
+    vals: Sequence[float],
+    target: float,
+    tol: float,
+    *,
+    allow_subset: bool = True,
+    max_components: int | None = None,
+) -> tuple[list[int], float] | None:
+    """Brute-force +/- solver with optional subset support and max length guard."""
+    n = len(vals)
+    if n == 0:
+        return None
+    if max_components is not None and n > max_components:
+        return None
+    total = sum(vals)
+    if abs(total - target) <= tol:
+        return ([+1] * n, total)
+
+    import itertools
+
+    choices = (-1, 0, +1) if allow_subset else (-1, +1)
+    for signs in itertools.product(choices, repeat=n):
+        if allow_subset and all(sign == 0 for sign in signs):
+            continue
+        trial = sum(sign * val for sign, val in zip(signs, vals))
+        if abs(trial - target) <= tol:
+            return (list(signs), trial)
+    return None
 
 def _normalize_df_for_excel(doc_type: str, df: Any) -> Any:
     """
@@ -859,37 +974,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                                 out.append(tok)
                         return out
 
-                    # Expand a list of component IDs into leaf row indices (descend into children when needed)
-                    def _expand_to_leaf_indices(ids: list[str]) -> list[int]:
-                        visited: set[str] = set()
-                        out_idx: list[int] = []
-                        def _walk(_id: str):
-                            if not _id or _id in visited:
-                                return
-                            visited.add(_id)
-                            if _id in id_map:
-                                idx = id_map[_id]
-                                try:
-                                    rtype = str(type_series.get(idx, "") if type_series is not None else df.at[idx, "row_type"]).strip().lower()
-                                except Exception:
-                                    rtype = ""
-                                if rtype in {"item", "line"}:
-                                    out_idx.append(idx)
-                                    return
-                            # Not a direct item → descend into children if any
-                            for child in (children_of.get(_id, []) or []):
-                                _walk(child)
-                            # If no explicit children, include the node itself as a leaf (subtotal value)
-                            if _id in id_map and id_map[_id] not in out_idx:
-                                out_idx.append(id_map[_id])
-                        for _id in (ids or []):
-                            _walk(str(_id).strip())
-                        # unique preserving order
-                        seen = set(); uniq = []
-                        for i in out_idx:
-                            if i not in seen:
-                                uniq.append(i); seen.add(i)
-                        return uniq
+                    row_type_lookup = _make_row_type_lookup(df, type_series)
 
                     # Prefer more specific section label if available (module-level helper)
 
@@ -898,7 +983,15 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                         tot_mask = df.get(comp_col).apply(lambda x: str(x).strip() != "")
                         for t_idx in list(df.index[tot_mask]):
                             comp_ids = _parse_components(df.at[t_idx, comp_col]) if comp_col else []
-                            comp_idxs = _expand_to_leaf_indices(comp_ids) if comp_ids else []
+                            comp_idxs = _expand_component_ids(
+                                comp_ids,
+                                id_map=id_map,
+                                children_of=children_of,
+                                row_type_lookup=row_type_lookup,
+                                item_markers={"item", "line"},
+                                include_self_on_leaf=True,
+                                include_self_when_children=True,
+                            ) if comp_ids else []
                             if not comp_idxs:
                                 continue
                             part_name = str(df.at[t_idx, part_col])
@@ -1095,53 +1188,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
 
                 # use module-level _parse_components_value
 
-                # Expand a list of IDs into leaf item indices (descend into children if needed)
-                def _expand_to_items(ids):
-                    visited: set[str] = set()
-                    out_idx: list[int] = []
-                    def _walk(_id: str):
-                        if not _id or _id in visited:
-                            return
-                        visited.add(_id)
-                        if _id in id_map:
-                            idx = id_map[_id]
-                            try:
-                                rt = str(type_series.get(idx, "") if type_series is not None else df.at[idx, "row_type"]).strip().lower()
-                            except Exception:
-                                rt = ""
-                            if rt in {"line_item","line","item"}:
-                                out_idx.append(idx)
-                                return
-                        for child in (children_of.get(_id, []) or []):
-                            _walk(child)
-                        if _id in id_map and id_map[_id] not in out_idx:
-                            out_idx.append(id_map[_id])
-                    for _id in ids:
-                        _walk(str(_id).strip())
-                    # unique preserving order
-                    seen = set(); uniq=[]
-                    for i in out_idx:
-                        if i not in seen:
-                            seen.add(i); uniq.append(i)
-                    return uniq
-
-                # Simple +/- sign solver reused from P&L
-                def _solve_signs(vals, target, tol, allow_subset=True):
-                    n = len(vals)
-                    if n == 0:
-                        return None
-                    s = sum(vals)
-                    if abs(s - target) <= tol:
-                        return ([+1]*n, s)
-                    import itertools
-                    choices = [-1, 0, +1] if allow_subset else [-1, +1]
-                    for signs in itertools.product(choices, repeat=n):
-                        if all(x == 0 for x in signs):
-                            continue
-                        total = sum(signs[i]*vals[i] for i in range(n))
-                        if abs(total - target) <= tol:
-                            return (list(signs), total)
-                    return None
+                row_type_lookup = _make_row_type_lookup(df, type_series)
 
                 comp_col = None
                 if set(["id","calculation_references"]).issubset(set(map(str, df.columns))):
@@ -1152,7 +1199,15 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     comp_mask = df.get(comp_col).apply(lambda x: str(x).strip() != "")
                     for t_idx in list(df.index[comp_mask]):
                         comp_ids = _parse_components_value(df.at[t_idx, comp_col]) or []
-                        comp_idxs = _expand_to_items(comp_ids)
+                        comp_idxs = _expand_component_ids(
+                            comp_ids,
+                            id_map=id_map,
+                            children_of=children_of,
+                            row_type_lookup=row_type_lookup,
+                            item_markers={"line_item", "line", "item"},
+                            include_self_on_leaf=True,
+                            include_self_when_children=True,
+                        )
                         if not comp_idxs or len(comp_idxs) > max_components:
                             continue
                         try:
@@ -1166,7 +1221,13 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                                 continue
                             vals = [(_coerce_number_like(df.at[i, c]) or 0.0) for i in comp_idxs]
                             tol = max(abs_min_decl, abs(float(target)) * tol_pct_decl)
-                            solved = _solve_signs(vals, float(target), tol, allow_subset)
+                            solved = _solve_signs(
+                                vals,
+                                float(target),
+                                tol,
+                                allow_subset=allow_subset,
+                                max_components=max_components,
+                            )
                             if solved is None:
                                 continue
                             signs, total = solved
@@ -1365,52 +1426,22 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                     # Validate ALL rows that declare components, irrespective of row_type
                     tot_mask = df.get(comp_col).apply(lambda x: str(x).strip() != "")
 
-                    # Helper: recursively expand a list of component IDs into leaf row indices.
-                    # If an ID points to a heading or subtotal, include its descendants by parent_id.
-                    def _expand_to_leaf_indices(ids: list[str]) -> list[int]:
-                        visited: set[str] = set()
-                        out_idx: list[int] = []
-
-                        def _walk(_id: str):
-                            if not _id or _id in visited:
-                                return
-                            visited.add(_id)
-                            if _id in id_map:
-                                idx = id_map[_id]
-                                try:
-                                    rtype = str(type_series.get(idx, "")).strip().lower()
-                                except Exception:
-                                    rtype = ""
-                                if rtype == "item":
-                                    out_idx.append(idx)
-                                    return
-                            # Not a direct item → descend to children if any
-                            children = (children_of.get(_id, []) or [])
-                            if children:
-                                for child in children:
-                                    _walk(child)
-                            else:
-                                # No explicit children in parent_id graph → include the node itself as a leaf (subtotal value)
-                                if _id in id_map:
-                                    out_idx.append(id_map[_id])
-
-                        for _id in ids:
-                            _walk(str(_id).strip())
-                        # Unique while preserving order
-                        seen = set()
-                        uniq = []
-                        for i in out_idx:
-                            if i not in seen:
-                                uniq.append(i)
-                                seen.add(i)
-                        return uniq
+                    row_type_lookup = _make_row_type_lookup(df, type_series)
                     # Helper to fetch label for 'Section' column: use module-level helper
 
                     comp_col = "calculation_references" if "calculation_references" in df.columns else ("components" if "components" in df.columns else None)
                     for t_idx in list(df.index[tot_mask]):
                         comp_ids = _parse_components_value(df.at[t_idx, comp_col]) if comp_col else []
                         # Expand components via parent-child tree when needed (headings/subtotals)
-                        comp_idxs = _expand_to_leaf_indices(comp_ids) if comp_ids else []
+                        comp_idxs = _expand_component_ids(
+                            comp_ids,
+                            id_map=id_map,
+                            children_of=children_of,
+                            row_type_lookup=row_type_lookup,
+                            item_markers={"item"},
+                            include_self_on_leaf=True,
+                            include_self_when_children=False,
+                        ) if comp_ids else []
                         if valdbg_enabled():
                             missing_ids = [cid for cid in comp_ids if cid not in id_map]
                             if missing_ids:
@@ -1443,7 +1474,15 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                                     tid = ""
                                 if not tid or tid not in children_of:
                                     continue
-                                comp_idxs = _expand_to_leaf_indices(children_of.get(tid, []) or [])
+                                comp_idxs = _expand_component_ids(
+                                    children_of.get(tid, []) or [],
+                                    id_map=id_map,
+                                    children_of=children_of,
+                                    row_type_lookup=row_type_lookup,
+                                    item_markers={"item"},
+                                    include_self_on_leaf=True,
+                                    include_self_when_children=False,
+                                )
                                 if not comp_idxs:
                                     continue
                                 for c in num_cols:
@@ -1652,64 +1691,7 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
             except Exception:
                 type_series = df.get("row_type")
 
-            def _expand_to_items(ids: list[str]) -> list[int]:
-                visited: set[str] = set()
-                out_idx: list[int] = []
-                def _walk(_id: str):
-                    if not _id or _id in visited:
-                        return
-                    visited.add(_id)
-                    if _id in id_map:
-                        idx = id_map[_id]
-                        try:
-                            rtype = str(type_series.get(idx, "")).strip().lower()
-                        except Exception:
-                            rtype = ""
-                        if rtype == "item" or rtype == "line":
-                            out_idx.append(idx)
-                            return
-                    kids = (children_of.get(_id, []) or [])
-                    if kids:
-                        for ch in kids:
-                            _walk(ch)
-                    else:
-                        # leaf subtotal without explicit children → include its own value
-                        if _id in id_map:
-                            out_idx.append(id_map[_id])
-                for _id in ids:
-                    _walk(str(_id).strip())
-                # unique preserve order
-                seen = set(); uniq = []
-                for i in out_idx:
-                    if i not in seen:
-                        uniq.append(i); seen.add(i)
-                return uniq
-
-            # use module-level helper for section label with P&L default
-
-            def _solve_signs(vals: list[float], target: float, tol: float, allow_subset: bool) -> tuple[list[int], float] | None:
-                n = len(vals)
-                if n == 0:
-                    return None
-                if n > max_components:
-                    return None
-                # fast path: all-positive
-                s = sum(vals)
-                if abs(s - target) <= tol:
-                    return ([+1]*n, s)
-                # brute-force signs (+/-); optionally allow zero (ignore) when allow_subset
-                import itertools
-                if allow_subset:
-                    choices = [-1, 0, +1]
-                else:
-                    choices = [-1, +1]
-                for signs in itertools.product(choices, repeat=n):
-                    if all(x == 0 for x in signs):
-                        continue
-                    total = sum(signs[i]*vals[i] for i in range(n))
-                    if abs(total - target) <= tol:
-                        return (list(signs), total)
-                return None
+            row_type_lookup = _make_row_type_lookup(df, type_series)
 
             # Declared totals first (recommended)
             # use module-level _parse_components_value
@@ -1729,7 +1711,15 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                 tot_mask = df.get(comp_col).apply(_has_calc_refs)
                 for t_idx in list(df.index[tot_mask]):
                     comp_ids = _parse_components_value(df.at[t_idx, comp_col]) or []
-                    comp_idxs = _expand_to_items(comp_ids)
+                    comp_idxs = _expand_component_ids(
+                        comp_ids,
+                        id_map=id_map,
+                        children_of=children_of,
+                        row_type_lookup=row_type_lookup,
+                        item_markers={"item", "line"},
+                        include_self_on_leaf=True,
+                        include_self_when_children=False,
+                    )
                     if not comp_idxs:
                         continue
                     sec_label = _section_label_from_df(df, t_idx, "P&L")
@@ -1743,7 +1733,13 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                             continue
                         vals = [(_coerce_number_like(df.at[i, c]) or 0.0) for i in comp_idxs]
                         tol = max(abs_min, abs(float(target)) * tol_pct)
-                        solved = _solve_signs(vals, float(target), tol, allow_subset)
+                        solved = _solve_signs(
+                            vals,
+                            float(target),
+                            tol,
+                            allow_subset=allow_subset,
+                            max_components=max_components,
+                        )
                         if solved is None:
                             continue
                         signs, total = solved
@@ -1798,7 +1794,13 @@ def _write_statements_workbook(pdf_path: str, stem: str, combined_sheets: dict[s
                         continue
                     vals = [(_coerce_number_like(block.at[i, c]) or 0.0) for i in candidates]
                     tol = max(abs_min, abs(float(target)) * tol_pct)
-                    solved = _solve_signs(vals, float(target), tol, allow_subset)
+                    solved = _solve_signs(
+                        vals,
+                        float(target),
+                        tol,
+                        allow_subset=allow_subset,
+                        max_components=max_components,
+                    )
                     if solved is None:
                         continue
                     signs, total = solved

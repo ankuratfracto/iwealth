@@ -13,10 +13,12 @@ import os
 import json
 import time
 import logging
+import copy
 
 from .config import CFG
 from . import json_ops
 from . import excel_ops
+from . import analytics as _analytics
 from .ocr_client import call_fracto, call_fracto_parallel, resolve_api_key
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .selection import (
@@ -455,14 +457,227 @@ def run_cli(argv: List[str]) -> int:
             if df is not None:
                 combined_sheets[dt] = df
 
-    # Prepare combined_rows regardless of DataFrame availability
-    try:
-        combined_rows = {
-            k: ([] if (v is None or getattr(v, "empty", False)) else v.to_dict(orient="records"))
-            for k, v in (combined_sheets or {}).items()
+    # Statement-level validation and optional retries -------------------------------------------------
+    validation_reports: dict[str, dict] = {}
+    validation_history: list[dict] = []
+    retry_events: list[dict] = []
+
+    def _latest_payload(dt: str) -> dict:
+        payloads = third_pass_raw.get(dt) or []
+        if isinstance(payloads, list) and payloads:
+            for payload in reversed(payloads):
+                if isinstance(payload, dict) and payload:
+                    return payload
+        elif isinstance(payloads, dict):
+            return payloads
+        return {}
+
+    def _rows_for_doc(dt: str) -> list[dict]:
+        payload = _latest_payload(dt)
+        if payload:
+            try:
+                rows = json_ops.extract_rows(payload, doc_type=dt) or []
+            except Exception:
+                rows = []
+            if rows:
+                return rows
+        df = combined_sheets.get(dt)
+        if df is not None:
+            try:
+                return df.to_dict(orient="records")  # type: ignore[attr-defined]
+            except Exception:
+                return []
+        return []
+
+    def _period_labels_for_doc(dt: str) -> dict[str, str]:
+        payload = _latest_payload(dt)
+        if not payload:
+            return {}
+        cmap, labels = json_ops.extract_period_maps_from_payload(payload)
+        out: dict[str, str] = {}
+        for cid, label in (labels or {}).items():
+            out[str(cid).lower()] = str(label)
+        if not out and cmap:
+            for cid, meta in cmap.items():
+                if isinstance(meta, dict):
+                    out[str(cid).lower()] = str(meta.get("label", ""))
+                else:
+                    out[str(cid).lower()] = str(meta)
+        return out
+
+    third_validation_cfg = (CFG.get("passes", {}).get("third", {}) or {}).get("validation") or {}
+    validation_enabled = bool(third_validation_cfg.get("enable"))
+    retry_cfg = third_validation_cfg.get("retry") or {}
+
+    def _evaluate_validations(stage_label: str) -> list[str]:
+        temp_reports: dict[str, dict] = {}
+        failing: list[str] = []
+        doc_types = sorted(set(third_pass_raw) | set(combined_sheets))
+        for dt in doc_types:
+            rows = _rows_for_doc(dt)
+            labels = _period_labels_for_doc(dt)
+            try:
+                report = _analytics.quality_flags(dt, rows, labels)
+            except Exception as exc:
+                logger.error("[validation] quality flag computation failed for %s: %s", dt, exc)
+                report = {"flags": ["quality_flags_error"], "checks": [], "error": str(exc)}
+            temp_reports[dt] = report
+            stmt = (report.get("statement_validation") or {})
+            if stmt.get("enabled") and not stmt.get("passed"):
+                failing.append(dt)
+        validation_reports.clear()
+        validation_reports.update(temp_reports)
+        if failing:
+            logger.info("[validation] statements requiring attention → %s", failing)
+        validation_history.append(
+            {
+                "stage": stage_label,
+                "timestamp": time.time(),
+                "documents": copy.deepcopy(validation_reports),
+                "failing_documents": list(failing),
+            }
+        )
+        return failing
+
+    failed_docs: List[str] = []
+    if validation_enabled:
+        failed_docs = _evaluate_validations("initial")
+
+    if validation_enabled and retry_cfg.get("enable") and failed_docs:
+        max_attempts = int(retry_cfg.get("max_attempts") or 1)
+        extra_runs = max(0, max_attempts - 1)
+        plan_steps = list(retry_cfg.get("plan") or [])[:extra_runs]
+        if extra_runs and not plan_steps:
+            plan_steps = [{} for _ in range(extra_runs)]
+        truthy = {"1", "true", "yes", "y", "on"}
+        for dt in list(failed_docs):
+            pages = groups.get(dt) or []
+            if not pages:
+                logger.warning("[validation] cannot retry %s → no pages recorded", dt)
+                continue
+            base_route = routing_used.get(dt, {}) or {}
+            base_parser = base_route.get("parser_app") or ""
+            base_model = base_route.get("model") or ""
+            base_extra = base_route.get("extra") or "false"
+            current_company = base_route.get("company_type") or company_type
+            attempts_made = 0
+            resolved = False
+            for attempt_idx, step in enumerate(plan_steps, start=1):
+                attempts_made = attempt_idx
+                parser = step.get("parser_app") or base_parser
+                model = step.get("model") or base_model
+                extra = base_extra
+                if "extra_accuracy" in step:
+                    extra = "true" if str(step.get("extra_accuracy")).strip().lower() in truthy else "false"
+                if step.get("fallback_company_type"):
+                    current_company = str(step.get("fallback_company_type")).strip().lower() or current_company
+                    route = _resolve_routing(dt, company_type=current_company)
+                    if route == (None, None, None):
+                        logger.warning("[validation] retry for %s skipped (route disabled)", dt)
+                        continue
+                    parser, model, extra = route
+                parser = parser or base_parser
+                model = model or base_model
+                extra = extra if extra is not None else base_extra
+                if not parser:
+                    logger.warning("[validation] retry for %s lacks parser configuration", dt)
+                    continue
+                logger.info(
+                    "[validation] retrying %s attempt=%d parser=%s model=%s extra=%s company=%s",
+                    dt, attempt_idx, parser, model, extra, current_company,
+                )
+                event = {
+                    "doc_type": dt,
+                    "attempt": attempt_idx,
+                    "stage": f"retry_{attempt_idx}",
+                    "parser_app": parser,
+                    "model": model,
+                    "extra_accuracy": extra,
+                    "company_type": current_company,
+                    "pages": list(pages),
+                }
+                retry_events.append(event)
+                _, payload_retry, df_retry = _process_group(dt, pages, parser, model, extra)
+                if df_retry is not None:
+                    combined_sheets[dt] = df_retry
+                else:
+                    combined_sheets.pop(dt, None)
+                third_pass_raw.setdefault(dt, []).append(payload_retry)
+                routing_used[dt] = {
+                    "parser_app": parser,
+                    "model": model,
+                    "extra": extra,
+                    "company_type": current_company,
+                    "validation_retry": True,
+                    "retry_attempt": attempt_idx,
+                }
+                failed_docs = _evaluate_validations(event["stage"])
+                event["report"] = copy.deepcopy(validation_reports.get(dt))
+                event["failing_documents_after"] = list(failed_docs)
+                if dt not in failed_docs:
+                    event["outcome"] = "resolved"
+                    resolved = True
+                    break
+                else:
+                    event["outcome"] = "unresolved"
+            if not resolved and attempts_made:
+                logger.warning("[validation] %s still failing after %d retry attempt(s)", dt, attempts_made)
+
+    if validation_enabled and not retry_cfg.get("enable") and failed_docs:
+        logger.warning("[validation] failures detected but retry disabled → %s", failed_docs)
+
+    if validation_enabled:
+        failed_docs = _evaluate_validations("final")
+
+    report_cfg = (third_validation_cfg.get("report") or {})
+    if validation_enabled and bool(report_cfg.get("enable", True)):
+        try:
+            filename = str(report_cfg.get("filename", "{stem}_validation_report.json")).format(stem=stem)
+        except Exception:
+            filename = f"{stem}_validation_report.json"
+        report_path = Path(pdf_p).with_name(filename)
+        diagnostics = {
+            "file": pdf_p.name,
+            "generated_at": time.time(),
+            "validation_enabled": validation_enabled,
+            "failed_documents": list(failed_docs),
+            "history": validation_history,
+            "retry_events": retry_events,
+            "final_reports": copy.deepcopy(validation_reports),
         }
-    except Exception:
-        combined_rows = {}
+        try:
+            with open(report_path, "w", encoding="utf-8") as _fh:
+                json.dump(diagnostics, _fh, indent=2)
+            logger.info("[validation] diagnostics written: %s", report_path)
+        except Exception as exc:
+            logger.warning("[validation] failed to write diagnostics: %s", exc)
+
+
+    # Build combined_rows using latest payloads/DataFrames
+    combined_rows: dict[str, list[dict]] = {}
+    doc_union = sorted(set(third_pass_raw) | set(combined_sheets))
+    for dt in doc_union:
+        df = combined_sheets.get(dt)
+        if df is not None and not getattr(df, "empty", False):
+            try:
+                combined_rows[dt] = df.to_dict(orient="records")  # type: ignore[attr-defined]
+                continue
+            except Exception:
+                pass
+        combined_rows[dt] = _rows_for_doc(dt)
+
+    periods_by_doc: dict[str, dict] = {}
+    for dt_key, payloads in (third_pass_raw or {}).items():
+        dt_norm = normalize_doc_type(dt_key)
+        candidates = payloads if isinstance(payloads, list) else [payloads]
+        iterable = list(candidates)
+        for payload in reversed(iterable):
+            if not isinstance(payload, dict):
+                continue
+            cmap, _ = json_ops.extract_period_maps_from_payload(payload)
+            if cmap:
+                periods_by_doc[dt_norm] = cmap
+                break
 
     # If nothing parsed into DataFrames, still write empty workbook + JSON for visibility
     if not combined_sheets:
@@ -471,7 +686,7 @@ def run_cli(argv: List[str]) -> int:
                 or CFG.get("labels", {}).get("canonical", []) \
                 or []
             empty_sheets = {sn: pd.DataFrame() for sn in sheet_order}
-            _ = excel_ops._write_statements_workbook(str(pdf_p), stem, empty_sheets, routing_used=routing_used, periods_by_doc=None)
+            _ = excel_ops._write_statements_workbook(str(pdf_p), stem, empty_sheets, routing_used=routing_used, periods_by_doc=periods_by_doc)
         except Exception:
             pass
         json_ops.write_statements_json(
@@ -481,7 +696,7 @@ def run_cli(argv: List[str]) -> int:
         third_pass_time = time.time() - third_start
         total_time = time.time() - overall_start
     else:
-        _ = excel_ops._write_statements_workbook(str(pdf_p), stem, combined_sheets, routing_used=routing_used, periods_by_doc=None)
+        _ = excel_ops._write_statements_workbook(str(pdf_p), stem, combined_sheets, routing_used=routing_used, periods_by_doc=periods_by_doc)
         json_ops.write_statements_json(
             str(pdf_p), stem, combined_rows, groups, routing_used, company_type,
             out_path_override=json_out, first_pass_results=results, second_pass_result=second_res, third_pass_raw=third_pass_raw,

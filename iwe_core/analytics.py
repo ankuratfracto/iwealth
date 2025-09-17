@@ -349,6 +349,48 @@ def _canon_doc_kind(doc_type: str) -> str:
     return "Others"
 
 
+def _canon_stmt_key(doc_type: str) -> str:
+    base = _canon_doc_kind(doc_type).lower()
+    if "profit" in base or "loss" in base:
+        return "profit_and_loss"
+    if "balance" in base:
+        return "balance_sheet"
+    if "cash" in base:
+        return "cashflow"
+    return "others"
+
+
+def _particulars_text(row: dict) -> str:
+    try:
+        return str(row.get("Particulars") or row.get("particulars") or "").strip()
+    except Exception:
+        return ""
+
+
+def _row_values_for_pattern(rows: List[dict], pattern: str, cols: List[str] | None = None) -> Dict[str, float | None] | None:
+    if not pattern:
+        return None
+    try:
+        pat = re.compile(str(pattern), re.I)
+    except Exception:
+        return None
+    cols = cols or _num_cols_from_rows(rows)
+    for row in rows or []:
+        label = _particulars_text(row)
+        if not label:
+            continue
+        try:
+            if not pat.search(label):
+                continue
+        except Exception:
+            continue
+        values: Dict[str, float | None] = {}
+        for c in cols:
+            values[c] = _coerce_num(row.get(c))
+        return values
+    return None
+
+
 def pick_common_size_denominator(doc_type: str, rows: List[dict]) -> Dict[str, Any] | None:
     """Pick a denominator row candidate for common-size statements.
 
@@ -405,6 +447,244 @@ def _coerce_num(v) -> float | None:
         return -val if neg else val
     except Exception:
         return None
+
+
+def _statement_validation(doc_type: str, rows: List[dict], period_labels: Dict[str, str]) -> Dict[str, Any] | None:
+    cfg_root = (CFG.get("validation", {}) or {})
+    if not bool(cfg_root.get("enable", True)):
+        return {"enabled": False, "passed": True, "failures": [], "checks": [], "metrics": {}}
+
+    stmt_cfg = (cfg_root.get("statement_quality") or {})
+    if not bool(stmt_cfg.get("enable", False)):
+        return {"enabled": False, "passed": True, "failures": [], "checks": [], "metrics": {}}
+
+    stmt_key = _canon_stmt_key(doc_type)
+    result: Dict[str, Any] = {
+        "enabled": True,
+        "passed": True,
+        "failures": [],
+        "checks": [],
+        "metrics": {},
+        "doc_kind": stmt_key,
+    }
+
+    def _fail(code: str, message: str, details: Dict[str, Any] | None = None) -> None:
+        result["failures"].append({"code": code, "message": message, "details": details or {}})
+        result["passed"] = False
+
+    row_count = len(rows or [])
+    cols = _num_cols_from_rows(rows)
+    metrics: Dict[str, Any] = {"row_count": row_count, "numeric_columns": cols}
+
+    # Row-level completeness
+    blanks = 0
+    labels_norm: List[str] = []
+    for row in rows or []:
+        label = _particulars_text(row)
+        if not label:
+            blanks += 1
+        else:
+            labels_norm.append(label.lower())
+    blank_pct = (blanks * 100.0 / row_count) if row_count else 0.0
+    dup_count = max(0, len(labels_norm) - len(set(labels_norm)))
+    dup_pct = (dup_count * 100.0 / row_count) if row_count else 0.0
+    metrics.update({
+        "blank_particulars_pct": round(blank_pct, 2),
+        "duplicate_particulars_pct": round(dup_pct, 2),
+    })
+
+    min_rows_cfg = (stmt_cfg.get("min_rows") or {})
+    min_rows = int(min_rows_cfg.get(stmt_key) or min_rows_cfg.get("default") or 0)
+    if min_rows and row_count < min_rows:
+        _fail("min_rows", f"rows={row_count} < required {min_rows}", {"rows": row_count, "required": min_rows})
+
+    max_blank_pct = float(stmt_cfg.get("max_blank_particulars_pct") or 0.0)
+    if max_blank_pct and blank_pct > max_blank_pct:
+        _fail("blank_particulars", f"blank particulars {blank_pct:.1f}% exceeds {max_blank_pct}%", {"blank_pct": blank_pct})
+
+    max_dup_pct = float(stmt_cfg.get("max_duplicate_particulars_pct") or 0.0)
+    if max_dup_pct and dup_pct > max_dup_pct:
+        _fail("duplicate_particulars", f"duplicate particulars {dup_pct:.1f}% exceeds {max_dup_pct}%", {"duplicate_pct": dup_pct})
+
+    # Column requirements
+    col_cfg = (stmt_cfg.get("column_requirements") or {})
+    req_cfg = (col_cfg.get(stmt_key) or {}) if stmt_key != "others" else {}
+    required_cols = [str(c) for c in (req_cfg.get("required") or [])]
+    missing_cols = [c for c in required_cols if c not in cols]
+    if missing_cols:
+        _fail("missing_columns", "Required numeric columns missing", {"missing": missing_cols, "present": cols})
+
+    fill_counts: Dict[str, int] = {}
+    for c in cols:
+        fill_counts[c] = sum(1 for r in rows or [] if _coerce_num(r.get(c)) is not None)
+    total_cells = row_count * len(cols)
+    filled_cells = sum(fill_counts.values())
+    density_pct = (filled_cells * 100.0 / total_cells) if total_cells else 0.0
+    metrics["numeric_density_pct"] = round(density_pct, 2)
+
+    min_density = float(stmt_cfg.get("min_numeric_density_pct") or 0.0)
+    if min_density and density_pct < min_density:
+        _fail("numeric_density", f"numeric cell density {density_pct:.1f}% below {min_density}%", {"density_pct": density_pct})
+
+    ratio_pct = float(req_cfg.get("min_fill_ratio_pct") or 0.0)
+    if ratio_pct and fill_counts:
+        best = max(fill_counts.values())
+        if best > 0:
+            threshold = (ratio_pct / 100.0) * best
+            bad_cols = [c for c in required_cols if fill_counts.get(c, 0) < threshold]
+            if bad_cols:
+                _fail(
+                    "column_fill_ratio",
+                    "Columns fail fill ratio requirement",
+                    {"required_ratio_pct": ratio_pct, "best_filled": best, "problem_columns": {c: fill_counts.get(c, 0) for c in bad_cols}},
+                )
+
+    # Required anchor rows by regex
+    patterns_cfg = (stmt_cfg.get("required_patterns") or {}).get(stmt_key) or []
+    missing_patterns = []
+    if patterns_cfg:
+        for pat in patterns_cfg:
+            values = _row_values_for_pattern(rows, pat, cols)
+            if values is None:
+                missing_patterns.append(pat)
+    if missing_patterns:
+        _fail("missing_anchor_rows", "Key line items not detected", {"patterns": missing_patterns})
+
+    # Period metadata coverage
+    periods_cfg = stmt_cfg.get("period_labels") or {}
+    period_labels_norm: Dict[str, str] = {}
+    for k, v in (period_labels or {}).items():
+        key = str(k).lower()
+        if isinstance(v, dict):
+            label = str(v.get("label", "")).strip()
+        else:
+            label = str(v).strip()
+        period_labels_norm[key] = label
+    if periods_cfg.get("enable"):
+        if periods_cfg.get("require_column_count_match"):
+            mapped = [c for c in cols if period_labels_norm.get(c.lower())]
+            if cols and len(mapped) < len(cols):
+                _fail("period_label_coverage", "Missing period labels for some numeric columns", {"columns": cols, "labeled": mapped})
+        min_labels_cfg = (periods_cfg.get("min_labels") or {})
+        min_labels = int(min_labels_cfg.get(stmt_key) or 0)
+        if min_labels:
+            non_empty = [lbl for lbl in period_labels_norm.values() if lbl]
+            if len(non_empty) < min_labels:
+                _fail("insufficient_period_labels", f"Found {len(non_empty)} labels < required {min_labels}", {"labels": period_labels_norm})
+
+    # Arithmetic checks
+    arith_root = stmt_cfg.get("arithmetic") or {}
+    if arith_root.get("enable"):
+        for rule in arith_root.get(stmt_key) or []:
+            name = str(rule.get("name") or "rule")
+            tol_pct = float(rule.get("tolerance_pct") or 0.0)
+            abs_floor = float(rule.get("tolerance_abs") or 1.0)
+            check_entry: Dict[str, Any] = {"name": name, "status": "skipped"}
+
+            def _tolerance(a: float, b: float) -> float:
+                basis = max(abs(a), abs(b), 1.0)
+                tol = (tol_pct / 100.0) * basis if tol_pct else 0.0
+                return max(abs_floor, tol)
+
+            if rule.get("components") and rule.get("target"):
+                target = _row_values_for_pattern(rows, rule.get("target"), cols)
+                components = [_row_values_for_pattern(rows, pat, cols) for pat in (rule.get("components") or [])]
+                if not target or any(c is None for c in components):
+                    check_entry.update({"status": "missing_data", "reason": "target_or_components_missing"})
+                else:
+                    diffs = []
+                    for col in cols:
+                        t = target.get(col)
+                        if t is None:
+                            continue
+                        vals: List[float] = []
+                        missing = False
+                        for comp in components:
+                            v = comp.get(col)
+                            if v is None:
+                                missing = True
+                                break
+                            vals.append(v)
+                        if missing or not vals:
+                            continue
+                        expected = sum(vals)
+                        diff = abs(t - expected)
+                        tol = _tolerance(t, expected)
+                        diffs.append({"column": col, "target": t, "expected": expected, "diff": diff, "tolerance": tol, "ok": diff <= tol})
+                    valid = [d for d in diffs if "ok" in d]
+                    if not valid:
+                        check_entry.update({"status": "missing_data", "reason": "no_numeric_columns"})
+                    elif any(not d["ok"] for d in valid):
+                        check_entry.update({"status": "fail", "details": valid})
+                        _fail("arithmetic_components", f"Rule {name} failed", {"details": valid})
+                    else:
+                        check_entry.update({"status": "ok", "details": valid})
+
+            elif rule.get("target") and rule.get("minuend") and rule.get("subtrahend"):
+                target = _row_values_for_pattern(rows, rule.get("target"), cols)
+                minuend = _row_values_for_pattern(rows, rule.get("minuend"), cols)
+                subtrahend = _row_values_for_pattern(rows, rule.get("subtrahend"), cols)
+                if not target or not minuend or not subtrahend:
+                    check_entry.update({"status": "missing_data", "reason": "rows_missing"})
+                else:
+                    diffs = []
+                    for col in cols:
+                        t = target.get(col)
+                        a = minuend.get(col)
+                        b = subtrahend.get(col)
+                        if None in (t, a, b):
+                            continue
+                        expected = a - b
+                        diff = abs(t - expected)
+                        tol = _tolerance(t, expected)
+                        diffs.append({"column": col, "target": t, "expected": expected, "diff": diff, "tolerance": tol, "ok": diff <= tol})
+                    if not diffs:
+                        check_entry.update({"status": "missing_data", "reason": "no_numeric_columns"})
+                    elif any(not d["ok"] for d in diffs):
+                        check_entry.update({"status": "fail", "details": diffs})
+                        _fail("arithmetic_difference", f"Rule {name} failed", {"details": diffs})
+                    else:
+                        check_entry.update({"status": "ok", "details": diffs})
+
+            elif rule.get("lhs") and rule.get("rhs"):
+                lhs = _row_values_for_pattern(rows, rule.get("lhs"), cols)
+                rhs_patterns = rule.get("rhs") or []
+                rhs_values = [_row_values_for_pattern(rows, pat, cols) for pat in rhs_patterns]
+                if not lhs or any(rv is None for rv in rhs_values):
+                    check_entry.update({"status": "missing_data", "reason": "lhs_or_rhs_missing"})
+                else:
+                    diffs = []
+                    for col in cols:
+                        a = lhs.get(col)
+                        if a is None:
+                            continue
+                        rhs_sum = 0.0
+                        missing = False
+                        for rv in rhs_values:
+                            v = rv.get(col)
+                            if v is None:
+                                missing = True
+                                break
+                            rhs_sum += v
+                        if missing:
+                            continue
+                        diff = abs(a - rhs_sum)
+                        tol = _tolerance(a, rhs_sum)
+                        diffs.append({"column": col, "target": a, "expected": rhs_sum, "diff": diff, "tolerance": tol, "ok": diff <= tol})
+                    if not diffs:
+                        check_entry.update({"status": "missing_data", "reason": "no_numeric_columns"})
+                    elif any(not d["ok"] for d in diffs):
+                        check_entry.update({"status": "fail", "details": diffs})
+                        _fail("arithmetic_lhs_rhs", f"Rule {name} failed", {"details": diffs})
+                    else:
+                        check_entry.update({"status": "ok", "details": diffs})
+            else:
+                check_entry.update({"status": "skipped", "reason": "unsupported_rule"})
+
+            result["checks"].append(check_entry)
+
+    result["metrics"].update(metrics)
+    return result
 
 
 def quality_flags(doc_type: str, rows: List[dict], period_labels: Dict[str, str]) -> Dict[str, Any]:
@@ -471,7 +751,14 @@ def quality_flags(doc_type: str, rows: List[dict], period_labels: Dict[str, str]
                     "status": "OK" if ok else "MISMATCH",
                 })
 
-    return {"flags": sorted(set(flags)), "checks": checks}
+    stmt_validation = _statement_validation(doc_type, rows, period_labels)
+    if stmt_validation and stmt_validation.get("enabled") and stmt_validation.get("failures"):
+        flags.append("statement_validation_failed")
+
+    out: Dict[str, Any] = {"flags": sorted(set(flags)), "checks": checks}
+    if stmt_validation:
+        out["statement_validation"] = stmt_validation
+    return out
 
 
 # --- Footnote linkage -------------------------------------------------------
