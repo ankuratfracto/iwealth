@@ -508,6 +508,89 @@ def run_cli(argv: List[str]) -> int:
     third_validation_cfg = (CFG.get("passes", {}).get("third", {}) or {}).get("validation") or {}
     validation_enabled = bool(third_validation_cfg.get("enable"))
     retry_cfg = third_validation_cfg.get("retry") or {}
+    report_cfg = third_validation_cfg.get("report") or {}
+    summary_enabled = bool(report_cfg.get("summary_enable", True))
+    try:
+        summary_template = str(report_cfg.get("summary_filename", "{stem}_validation_summary.txt"))
+    except Exception:
+        summary_template = "{stem}_validation_summary.txt"
+    summary_written = False
+
+    def _resolve_summary_path(stage_label: str) -> Path:
+        try:
+            name = summary_template.format(stem=stem, stage=stage_label)
+        except Exception:
+            name = f"{stem}_validation_summary.txt"
+        return Path(pdf_p).with_name(name)
+
+    def _write_summary(stage_label: str, failing: List[str]) -> None:
+        nonlocal summary_written
+        if not summary_enabled:
+            return
+        path = _resolve_summary_path(stage_label)
+        mode = "a" if summary_written and path.exists() else "w"
+        if mode == "w":
+            summary_written = True
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        lines: List[str] = []
+        lines.append(f"[{stage_label}] {timestamp}")
+        if not failing:
+            lines.append("All statements passed validation.")
+        else:
+            for dt in failing:
+                report = validation_reports.get(dt) or {}
+                stmt = (report.get("statement_validation") or {})
+                lines.append(f"- {dt}")
+                failures = stmt.get("failures") or []
+                if failures:
+                    for fail in failures:
+                        code = str(fail.get("code"))
+                        message = str(fail.get("message"))
+                        details = fail.get("details") or {}
+                        lines.append(f"    [{code}] {message}")
+                        limit = None
+                        if isinstance(details, dict):
+                            if code == "missing_anchor_rows" and details.get("patterns"):
+                                limit = [f"Missing pattern → {pat}" for pat in details.get("patterns", [])]
+                            elif code == "missing_columns" and details.get("missing"):
+                                limit = [f"Missing column → {col}" for col in details.get("missing", [])]
+                            elif code == "column_fill_ratio" and details.get("problem_columns"):
+                                msg_items = []
+                                for col, count in sorted(details.get("problem_columns", {}).items()):
+                                    msg_items.append(f"Column {col}: filled {count}")
+                                limit = msg_items
+                            elif code == "period_label_coverage" and details.get("columns"):
+                                unlabeled = set(details.get("columns", [])) - set(details.get("labeled", []))
+                                limit = [f"Unlabeled period column → {col}" for col in sorted(unlabeled)]
+                            elif code in {"arithmetic_components", "arithmetic_difference", "arithmetic_lhs_rhs"} and details.get("details"):
+                                rows = []
+                                for entry in details.get("details", []):
+                                    col = entry.get("column")
+                                    diff = entry.get("diff")
+                                    tol = entry.get("tolerance")
+                                    rows.append(f"Column {col}: diff={diff} tol={tol}")
+                                limit = rows
+                        if limit:
+                            for row in limit[:10]:
+                                lines.append(f"        {row}")
+                            if len(limit) > 10:
+                                lines.append(f"        … {len(limit) - 10} more")
+                else:
+                    flags = report.get("flags") or []
+                    if flags:
+                        lines.append(f"    Flags: {', '.join(flags)}")
+                    else:
+                        lines.append("    No explicit failure details available.")
+        try:
+            with open(path, mode, encoding="utf-8") as fh:
+                if mode == "a":
+                    fh.write("\n")
+                fh.write("\n".join(lines))
+                fh.write("\n")
+                fh.flush()
+            logger.info("[validation] summary written (%s): %s", stage_label, path)
+        except Exception as exc:
+            logger.warning("[validation] failed to write summary %s: %s", path, exc)
 
     def _evaluate_validations(stage_label: str) -> list[str]:
         temp_reports: dict[str, dict] = {}
@@ -542,6 +625,8 @@ def run_cli(argv: List[str]) -> int:
     failed_docs: List[str] = []
     if validation_enabled:
         failed_docs = _evaluate_validations("initial")
+        if failed_docs:
+            _write_summary("initial", failed_docs)
 
     if validation_enabled and retry_cfg.get("enable") and failed_docs:
         max_attempts = int(retry_cfg.get("max_attempts") or 1)
@@ -550,54 +635,110 @@ def run_cli(argv: List[str]) -> int:
         if extra_runs and not plan_steps:
             plan_steps = [{} for _ in range(extra_runs)]
         truthy = {"1", "true", "yes", "y", "on"}
-        for dt in list(failed_docs):
-            pages = groups.get(dt) or []
+        doc_states: Dict[str, Dict[str, Any]] = {}
+        for dt in failed_docs:
+            pages = sorted(groups.get(dt) or [])
             if not pages:
                 logger.warning("[validation] cannot retry %s → no pages recorded", dt)
                 continue
             base_route = routing_used.get(dt, {}) or {}
-            base_parser = base_route.get("parser_app") or ""
-            base_model = base_route.get("model") or ""
-            base_extra = base_route.get("extra") or "false"
-            current_company = base_route.get("company_type") or company_type
-            attempts_made = 0
-            resolved = False
-            for attempt_idx, step in enumerate(plan_steps, start=1):
-                attempts_made = attempt_idx
-                parser = step.get("parser_app") or base_parser
-                model = step.get("model") or base_model
-                extra = base_extra
-                if "extra_accuracy" in step:
-                    extra = "true" if str(step.get("extra_accuracy")).strip().lower() in truthy else "false"
-                if step.get("fallback_company_type"):
-                    current_company = str(step.get("fallback_company_type")).strip().lower() or current_company
-                    route = _resolve_routing(dt, company_type=current_company)
-                    if route == (None, None, None):
-                        logger.warning("[validation] retry for %s skipped (route disabled)", dt)
+            doc_states[dt] = {
+                "pages": pages,
+                "base_parser": base_route.get("parser_app") or "",
+                "base_model": base_route.get("model") or "",
+                "base_extra": base_route.get("extra") or "false",
+                "company_type": base_route.get("company_type") or company_type,
+                "resolved": False,
+            }
+
+        max_workers_retry = max_workers
+
+        for attempt_idx, step in enumerate(plan_steps, start=1):
+            pending_docs = [dt for dt, state in doc_states.items() if not state.get("resolved")]
+            if not pending_docs:
+                break
+            stage_label = f"retry_{attempt_idx}"
+            events_current: Dict[str, Dict[str, Any]] = {}
+            futures: list[tuple[Any, str, Dict[str, Any], str, str, str, str]] = []
+            with ThreadPoolExecutor(max_workers=max_workers_retry) as pool:
+                for dt in pending_docs:
+                    state = doc_states[dt]
+                    pages = state["pages"]
+                    parser = step.get("parser_app") or state.get("base_parser", "")
+                    model = step.get("model") or state.get("base_model", "")
+                    extra = state.get("base_extra", "false")
+                    company_for_attempt = state.get("company_type") or company_type
+                    if "extra_accuracy" in step:
+                        extra = "true" if str(step.get("extra_accuracy")).strip().lower() in truthy else "false"
+                    if step.get("fallback_company_type"):
+                        fallback_company = str(step.get("fallback_company_type")).strip().lower() or company_for_attempt
+                        route = _resolve_routing(dt, company_type=fallback_company)
+                        if route == (None, None, None):
+                            logger.warning("[validation] retry for %s skipped (route disabled)", dt)
+                            event = {
+                                "doc_type": dt,
+                                "attempt": attempt_idx,
+                                "stage": stage_label,
+                                "parser_app": None,
+                                "model": None,
+                                "extra_accuracy": extra,
+                                "company_type": fallback_company,
+                                "pages": list(pages),
+                                "outcome": "skipped_disabled",
+                            }
+                            retry_events.append(event)
+                            events_current[dt] = event
+                            continue
+                        parser, model, extra = route
+                        company_for_attempt = fallback_company
+                    parser = parser or state.get("base_parser", "")
+                    model = model or state.get("base_model", "")
+                    extra = extra if extra is not None else state.get("base_extra", "false")
+                    if not parser:
+                        logger.warning("[validation] retry for %s lacks parser configuration", dt)
+                        event = {
+                            "doc_type": dt,
+                            "attempt": attempt_idx,
+                            "stage": stage_label,
+                            "parser_app": parser,
+                            "model": model,
+                            "extra_accuracy": extra,
+                            "company_type": company_for_attempt,
+                            "pages": list(pages),
+                            "outcome": "skipped_no_parser",
+                        }
+                        retry_events.append(event)
+                        events_current[dt] = event
                         continue
-                    parser, model, extra = route
-                parser = parser or base_parser
-                model = model or base_model
-                extra = extra if extra is not None else base_extra
-                if not parser:
-                    logger.warning("[validation] retry for %s lacks parser configuration", dt)
-                    continue
-                logger.info(
-                    "[validation] retrying %s attempt=%d parser=%s model=%s extra=%s company=%s",
-                    dt, attempt_idx, parser, model, extra, current_company,
-                )
-                event = {
-                    "doc_type": dt,
-                    "attempt": attempt_idx,
-                    "stage": f"retry_{attempt_idx}",
-                    "parser_app": parser,
-                    "model": model,
-                    "extra_accuracy": extra,
-                    "company_type": current_company,
-                    "pages": list(pages),
-                }
-                retry_events.append(event)
-                _, payload_retry, df_retry = _process_group(dt, pages, parser, model, extra)
+                    logger.info(
+                        "[validation] retrying %s attempt=%d parser=%s model=%s extra=%s company=%s",
+                        dt, attempt_idx, parser, model, extra, company_for_attempt,
+                    )
+                    event = {
+                        "doc_type": dt,
+                        "attempt": attempt_idx,
+                        "stage": stage_label,
+                        "parser_app": parser,
+                        "model": model,
+                        "extra_accuracy": extra,
+                        "company_type": company_for_attempt,
+                        "pages": list(pages),
+                    }
+                    retry_events.append(event)
+                    events_current[dt] = event
+                    futures.append(
+                        (
+                            pool.submit(_process_group, dt, pages, parser, model, extra),
+                            dt,
+                            event,
+                            parser,
+                            model,
+                            company_for_attempt,
+                            extra,
+                        )
+                    )
+            for future, dt, event, parser, model, company_for_attempt, extra in futures:
+                _, payload_retry, df_retry = future.result()
                 if df_retry is not None:
                     combined_sheets[dt] = df_retry
                 else:
@@ -607,27 +748,45 @@ def run_cli(argv: List[str]) -> int:
                     "parser_app": parser,
                     "model": model,
                     "extra": extra,
-                    "company_type": current_company,
+                    "company_type": company_for_attempt,
                     "validation_retry": True,
                     "retry_attempt": attempt_idx,
                 }
-                failed_docs = _evaluate_validations(event["stage"])
+                state = doc_states.get(dt)
+                if state:
+                    state["base_parser"] = parser
+                    state["base_model"] = model
+                    state["base_extra"] = extra
+                    state["company_type"] = company_for_attempt
+            failed_docs = _evaluate_validations(stage_label)
+            _write_summary(stage_label, failed_docs)
+            failing_set = set(failed_docs)
+            for dt, event in events_current.items():
                 event["report"] = copy.deepcopy(validation_reports.get(dt))
                 event["failing_documents_after"] = list(failed_docs)
-                if dt not in failed_docs:
-                    event["outcome"] = "resolved"
-                    resolved = True
-                    break
+                if dt in failing_set:
+                    event.setdefault("outcome", "unresolved")
+                    if dt in doc_states:
+                        doc_states[dt]["resolved"] = False
                 else:
-                    event["outcome"] = "unresolved"
-            if not resolved and attempts_made:
-                logger.warning("[validation] %s still failing after %d retry attempt(s)", dt, attempts_made)
+                    event["outcome"] = event.get("outcome", "resolved")
+                    if dt in doc_states:
+                        doc_states[dt]["resolved"] = True
+
+        remaining = [dt for dt, state in doc_states.items() if not state.get("resolved")]
+        if remaining:
+            logger.warning(
+                "[validation] still failing after retries → %s",
+                remaining,
+            )
 
     if validation_enabled and not retry_cfg.get("enable") and failed_docs:
         logger.warning("[validation] failures detected but retry disabled → %s", failed_docs)
 
     if validation_enabled:
         failed_docs = _evaluate_validations("final")
+        if summary_written:
+            _write_summary("final", failed_docs)
 
     report_cfg = (third_validation_cfg.get("report") or {})
     if validation_enabled and bool(report_cfg.get("enable", True)):

@@ -17,7 +17,7 @@ api:
 
 concurrency:
   chunk_size_pages: 1
-  max_parallel: 10
+  max_parallel: 5
   min_tail_combine: 1
 
 passes:
@@ -86,7 +86,7 @@ passes:
       extra_accuracy: false
     # Retry plan if a group's validation fails
     validation:
-      enable: true
+      enable: false
       retry:
         enable: true
         max_attempts: 2
@@ -95,6 +95,8 @@ passes:
       report:
         enable: true
         filename: "{stem}_validation_report.json"
+        summary_enable: true
+        summary_filename: "{stem}_validation_summary.txt"
     on_validation_failure:
       retries:
         - { alternate_parser: true }   # try next parser in routing for that (company_type, doc_type)
@@ -234,22 +236,22 @@ routing:                                # per (company_type × doc_type)
   # instead of falling back to a different parser.
   skip_on_disabled: true
   non financial company:
-    consolidated balance sheet:             { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: true }
+    consolidated balance sheet:             { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: false }
     # done
-    standalone balance sheet:               { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: true }
+    standalone balance sheet:               { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: false }
     # done
-    consolidated profit and loss statement: { parser: "45iTjJU1BzL6qSWF", model: "gv1", extra: true, enable: true } # 1hh51mG0tc3z4hYC
+    consolidated profit and loss statement: { parser: "3q1mGURYmRJQARFn", model: "gv1", extra: true, enable: true } # 1hh51mG0tc3z4hYC
     # done
-    standalone profit and loss statement:   { parser: "45iTjJU1BzL6qSWF", model: "gv1", extra: true, enable: true }
+    standalone profit and loss statement:   { parser: "3q1mGURYmRJQARFn", model: "gv1", extra: true, enable: true }
     # done
     consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "gv1", extra: true, enable: false }
     # done
     standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "gv1", extra: true, enable: false }
     # done
   corporate:
-    consolidated balance sheet:             { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: true }
+    consolidated balance sheet:             { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: false }
     # done
-    standalone balance sheet:               { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: true }
+    standalone balance sheet:               { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: false }
     # done
     consolidated profit and loss statement: { parser: "45iTjJU1BzL6qSWF", model: "gv1", extra: true, enable: true }
     # done
@@ -260,14 +262,14 @@ routing:                                # per (company_type × doc_type)
     standalone cashflow:                    { parser: "9JcrGiEcJqtUvUB5", model: "gv1", extra: true, enable: false }
     # done
   bank:
-    consolidated balance sheet:             { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: true }
+    consolidated balance sheet:             { parser: "ccsUckRnWXahAJ5X", model: "tv6", extra: true, enable: false }
     # done
-    standalone balance sheet:               { parser: "ccsUckRnWXahAJ5X", model: "gv1", extra: true, enable: true } # JZRkn5y0kkSmABvy latest working id
+    standalone balance sheet:               { parser: "ccsUckRnWXahAJ5X", model: "tv6", extra: true, enable: false } # JZRkn5y0kkSmABvy latest working id
     # done
-    consolidated profit and loss statement: { parser: "45iTjJU1BzL6qSWF", model: "gv1", extra: true, enable: true }
+    consolidated profit and loss statement: { parser: "K7ubqYoXS5ecEkZx", model: "gv1", extra: true, enable: true }
     #consolidated profit and loss statement: { parser: "CPzQ1VdyXs6NjIil", model: "gv1", extra: true, enable: true } # for testing only
     # done
-    standalone profit and loss statement:   { parser: "45iTjJU1BzL6qSWF", model: "gv1", extra: true, enable: true } # 5o14rnboPfr82BG9 latest working id
+    standalone profit and loss statement:   { parser: "K7ubqYoXS5ecEkZx", model: "gv1", extra: true, enable: true } # 5o14rnboPfr82BG9 latest working id
     #standalone profit and loss statement:   { parser: "CPzQ1VdyXs6NjIil", model: "gv1", extra: true, enable: true } # for testing only
     # done
     consolidated cashflow:                  { parser: "9JcrGiEcJqtUvUB5", model: "gv1", extra: true, enable: false }
@@ -304,14 +306,14 @@ grouping:
   disable_header_override: true
 
 validation:
-  enable: true
+  enable: false
   rounding_tolerance_units:          # acceptable absolute diffs by unit
     crore: 0.01                      # ≈ 1 lakh when numbers are in crore
     million: 0.01
     lakh: 1
     thousand: 10
   statement_quality:
-    enable: true
+    enable: false
     min_rows:
       balance_sheet: 10
       profit_and_loss: 25
@@ -335,7 +337,7 @@ validation:
         - "^\\s*profit.*before.*tax\b"
         - "^\\s*profit.*after.*tax\b"
     arithmetic:
-      enable: true
+      enable: false
       profit_and_loss:
         - name: total_income_components
           target: "^\\s*total\\s*income\\b"
@@ -363,32 +365,32 @@ validation:
         profit_and_loss: 4
   checks:
     balance_sheet:
-      enforce_equation: true         # Assets ≈ Equity + Liabilities
+      enforce_equation: false         # Assets ≈ Equity + Liabilities
       pct_tolerance: 0.015           # 1.5% or rounding tolerance (whichever higher)
       # New: verify each section's Total equals sum of its items
       sum_subitems:
-        enable: true
+        enable: false
         tolerance_pct: 0.001         # allow 0.1% rounding noise
         abs_min: 1.0                 # or at least 1 unit (per your data unit)
       # Fine-grained toggles for which validations to run
-      declared_components: true          # only totals/subtotals with explicit `components`
+      declared_components: false          # only totals/subtotals with explicit `components`
       children_without_components: false # turn OFF unless explicitly needed
       section_checks: false              # turn OFF: only declared requested
       section_equality: false            # turn OFF: only declared requested
       contiguous_block_fallback: false  # turn OFF: only declared requested
       composed_and_grand: false         # turn OFF: only declared requested
     profit_and_loss:
-      enable: true
+      enable: false
       tolerance_pct: 0.005
       abs_min: 1.0
-      require_eps_block: true
-      use_declared_components_first: true
+      require_eps_block: false
+      use_declared_components_first: false
       declared_only: false            # allow fallback when components are not declared
       max_components: 10              # cap for brute-force; keep small if allow_subset=true
-      allow_subset: true              # explore +/-/drop combinations (3^N on <= max_components)
+      allow_subset: false              # explore +/-/drop combinations (3^N on <= max_components)
     cashflow:
-      enable: true
-      enforce_cash_tie: true         # CFO + CFI + CFF ≈ Δ cash; tie to opening/closing
+      enable: false
+      enforce_cash_tie: false         # CFO + CFI + CFF ≈ Δ cash; tie to opening/closing
       tolerance_pct: 0.005
       abs_min: 1.0
   # Company-type specific validation profiles (regex, case-insensitive)
