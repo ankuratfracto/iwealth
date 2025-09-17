@@ -31,6 +31,8 @@ from iwe_core.utils import (
     is_true_flag,
 )
 from iwe_core.json_ops import extract_rows as _extract_rows
+from iwe_core.mid_pass import filter_pages_via_mid_pass
+from iwe_core.pdf_ops import get_page_count_from_bytes
 
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -339,31 +341,43 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     import pandas as pd  # local, avoids import-order issues
     import io            # local, avoids import-order issu
     t_overall = time.time()
+    stem = Path(original_filename).stem
 
-    # 1) First pass
-    status_write("1/3 First pass — per-page OCR …")
-    t0 = time.time()
-    results = call_fracto_parallel(
-        pdf_bytes,
-        original_filename,
-        extra_accuracy=str(CFG.get("passes", {}).get("first", {}).get("extra_accuracy", False)).lower(),
-    )
-    dt0 = time.time() - t0
-    progress.progress(0.33, text=f"First pass complete in {dt0:.1f}s")
-    status_write(f"✓ First pass complete in {dt0:.1f}s — {len(results)} page(s)")
+    first_enabled = bool(CFG.get("passes", {}).get("first", {}).get("enable", True))
+    results: list[dict] = []
+
+    if first_enabled:
+        status_write("1/3 First pass — per-page OCR …")
+        t0 = time.time()
+        results = call_fracto_parallel(
+            pdf_bytes,
+            original_filename,
+            extra_accuracy=str(CFG.get("passes", {}).get("first", {}).get("extra_accuracy", False)).lower(),
+        )
+        dt0 = time.time() - t0
+        progress.progress(0.33, text=f"First pass complete in {dt0:.1f}s")
+        status_write(f"✓ First pass complete in {dt0:.1f}s — {len(results)} page(s)")
+
+        def _get_has_table(res: dict) -> bool:
+            field = str(((CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}).get("has_table_field", "has_table")))
+            pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
+            if isinstance(pdict, list):
+                for item in pdict:
+                    if isinstance(item, dict) and field in item:
+                        return is_true_flag(item.get(field))
+                return False
+            return is_true_flag(pdict.get(field))
+
+        selected_pages = [idx + 1 for idx, res in enumerate(results) if _get_has_table(res)]
+    else:
+        status_write("1/3 First pass — skipped (disabled in config)")
+
+        total_pages = get_page_count_from_bytes(pdf_bytes)
+        selected_pages = list(range(1, total_pages + 1))
+        progress.progress(0.33, text="First pass disabled — using all pages")
 
     # PDF page assembly handled by iwe_core.pdf_ops
     # 2) Select pages where has_table=true; also include pages whose headers clearly indicate a known doc type
-    def _get_has_table(res: dict) -> bool:
-        field = str(((CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}).get("has_table_field", "has_table")))
-        pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
-        if isinstance(pdict, list):
-            for item in pdict:
-                if isinstance(item, dict) and field in item:
-                    return is_true_flag(item.get(field))
-            return False
-        return is_true_flag(pdict.get(field))
-    selected_pages = [idx + 1 for idx, res in enumerate(results) if _get_has_table(res)]
     # Heuristic include: any page where header text suggests a known doc type (BS/PL/Cashflow)
     try:
         page_texts = extract_page_texts_from_pdf_bytes(pdf_bytes)
@@ -379,13 +393,40 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
         pass
     if not selected_pages:
         status_write("⚠️ No pages flagged via table or headers — including all pages.")
-        selected_pages = list(range(1, len(results) + 1))
+        selected_pages = (
+            list(range(1, len(results) + 1))
+            if first_enabled
+            else list(range(1, get_page_count_from_bytes(pdf_bytes) + 1))
+        )
     # Optional neighbour expansion via env var (default 0 to keep strict table-only selection)
     try:
         _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", str(int(((CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}).get("neighbor_radius", 0))))) )
     except Exception:
         _radius = int(((CFG.get("passes", {}).get("first", {}).get("selection", {}) or {}).get("neighbor_radius", 0)))
     selected_pages = expand_selected_pages(selected_pages, len(results), radius=_radius)
+    filtered_pages, mid_diag = filter_pages_via_mid_pass(
+        pdf_bytes,
+        selected_pages,
+        stem=stem,
+        logger_obj=logging.getLogger(__name__),
+    )
+    if mid_diag:
+        try:
+            summary = "; ".join(
+                f"{item['page']}={item['label'] or 'unclassified'}{'(drop)' if not item['keep'] else ''}"
+                for item in mid_diag
+            )
+            logging.getLogger(__name__).info("[mid-pass] page classifications → %s", summary)
+        except Exception:
+            pass
+        dropped = [item["page"] for item in mid_diag if not item.get("keep")]
+        if dropped:
+            status_write(f"  ⤷ Mid-pass classifier dropping pages {dropped}")
+    if filtered_pages:
+        selected_pages = filtered_pages
+    elif mid_diag:
+        status_write("  ⤷ Mid-pass classifier removed all pages; keeping previous selection")
+
     # Explicitly log which pages will go to the second pass
     try:
         logging.getLogger(__name__).info(
@@ -401,7 +442,6 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
 
     # 3) Second pass
     status_write("2/3 Second pass — classifying selected pages …")
-    stem = Path(original_filename).stem
     t1 = time.time()
     sel_pdf_name = str((CFG.get("passes", {}).get("second", {}) or {}).get("selected_pdf_name", "{stem}_selected.pdf")).format(stem=stem)
     second_res = call_fracto(
@@ -474,12 +514,26 @@ def generate_statements_excel_with_progress(pdf_bytes: bytes, original_filename:
     logging.getLogger(__name__).info("Routing company_type: %s (raw=%r)", company_type, org_type_raw)
 
     if not classification:
-        classification = [
-            {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
-            for i, r in enumerate(results)
-            if r.get("data", {}).get("parsedData", {}).get("Document_type", "Others").lower() != "others"
-        ]
-        classification = [it for it in classification if (it["page_number"] in selected_pages)]
+        tmp: list[dict] = []
+        if results:
+            for sel_idx, orig_page in enumerate(selected_pages, start=1):
+                if not (1 <= orig_page <= len(results)):
+                    continue
+                res = results[orig_page - 1] or {}
+                dt = (res.get("data", {}) or {}).get("parsedData", {}).get("Document_type")
+                if dt and str(dt).strip().lower() != "others":
+                    tmp.append({"page_number": sel_idx, "doc_type": dt})
+        elif mid_diag:
+            label_map = {int(it.get("page", 0)): str(it.get("label") or "") for it in mid_diag if isinstance(it, dict)}
+            for sel_idx, orig_page in enumerate(selected_pages, start=1):
+                raw = label_map.get(orig_page, "")
+                if not raw:
+                    continue
+                human = raw.replace("_", " ")
+                dt_norm = normalize_doc_type(human)
+                if dt_norm and dt_norm != "Others":
+                    tmp.append({"page_number": sel_idx, "doc_type": dt_norm})
+        classification = tmp
     if not classification:
         status_write("⚠️ Could not derive classification — aborting third pass.")
         return None

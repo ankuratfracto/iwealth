@@ -218,6 +218,18 @@ def build_groups(
             if prev_dt and next_dt and prev_dt == next_dt:
                 doc_by_page[p] = prev_dt
 
+    include_next_page = bool(CFG.get("grouping", {}).get("include_next_page_for_statements", True))
+    if include_next_page:
+        total_pages = len(page_texts)
+        for orig, dt in list(doc_by_page.items()):
+            if dt == "Others":
+                continue
+            nxt = orig + 1
+            if nxt > total_pages:
+                continue
+            if doc_by_page.get(nxt) in (None, "Others"):
+                doc_by_page[nxt] = dt
+
     groups: dict[str, list[int]] = {}
     for p in sorted(doc_by_page):
         dt = doc_by_page[p]

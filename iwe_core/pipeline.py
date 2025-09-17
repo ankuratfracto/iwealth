@@ -27,8 +27,9 @@ from .selection import (
     _second_pass_org_type,
     expand_selected_pages,
 )
-from .grouping import build_groups
-from .pdf_ops import build_pdf_from_pages
+from .grouping import build_groups, normalize_doc_type
+from .pdf_ops import build_pdf_from_pages, get_page_count_from_bytes
+from .mid_pass import filter_pages_via_mid_pass
 
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,8 @@ def _pick_selected_pages(results: List[Dict[str, Any]]) -> List[int]:
     return pages
 
 
+
+
 def run_cli(argv: List[str]) -> int:
     if not argv:
         print("Usage: python a.py <pdf-path> [output.json] [output.xlsx] [KEY=VALUE ...]")
@@ -181,47 +184,82 @@ def run_cli(argv: List[str]) -> int:
 
     overall_start = time.time()
     first_pass_time = 0.0
+    pre_second_time = 0.0
     second_pass_time = 0.0
     third_pass_time = 0.0
-    # Resolve PDF path once for downstream writes
+    setup_time = 0.0
     pdf_p = Path(pdf_path).expanduser().resolve()
 
-    # First pass
-    _t0 = time.time()
-    results = _process_pdf_first_pass(pdf_path)
-    first_pass_time = time.time() - _t0
+    with open(pdf_p, "rb") as fh:
+        orig_bytes = fh.read()
 
-    # Save first-pass JSON
-    json_ops.save_results(results, str(pdf_p), None)
+    setup_time = time.time() - overall_start
 
-    # Select pages
-    selected_pages = _pick_selected_pages(results)
-    if not selected_pages:
-        # Fallback: include non-others
-        selected_pages = [
-            idx + 1
-            for idx, res in enumerate(results)
-            if ( (res.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "").lower() != "others" )
-        ]
-    # Optionally expand neighbours by env
-    try:
-        _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", "0"))
-        if _radius > 0:
-            selected_pages = expand_selected_pages(selected_pages, len(results), radius=_radius)
-    except Exception:
-        pass
+    first_enabled = bool(CFG.get("passes", {}).get("first", {}).get("enable", True))
+    results: List[Dict[str, Any]] = []
+
+    first_start = time.time()
+    if first_enabled:
+        results = _process_pdf_first_pass(pdf_path)
+        json_ops.save_results(results, str(pdf_p), None)
+
+        selected_pages = _pick_selected_pages(results)
+        if not selected_pages:
+            selected_pages = [
+                idx + 1
+                for idx, res in enumerate(results)
+                if ((res.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "").lower() != "others")
+            ]
+        try:
+            _radius = int(os.getenv("FRACTO_EXPAND_NEIGHBORS", "0"))
+            if _radius > 0:
+                selected_pages = expand_selected_pages(selected_pages, len(results), radius=_radius)
+        except Exception:
+            pass
+    else:
+        total_pages = get_page_count_from_bytes(orig_bytes)
+        selected_pages = list(range(1, total_pages + 1))
+        logger.info(
+            "First pass disabled via config; using all %d page(s) for pre-second classifier",
+            len(selected_pages),
+        )
+
+    first_pass_time = time.time() - first_start
 
     if not selected_pages:
         logger.error("No pages selected for second pass")
         return 4
 
-    # Build selected.pdf (pdf_p is already resolved)
-    with open(pdf_p, "rb") as fh:
-        orig_bytes = fh.read()
+    pre_second_start = time.time()
+    filtered_pages, mid_diag = filter_pages_via_mid_pass(
+        orig_bytes,
+        selected_pages,
+        stem=pdf_p.stem,
+        logger_obj=logger,
+        output_dir=pdf_p.parent,
+    )
+    pre_second_time = time.time() - pre_second_start
+    if mid_diag:
+        try:
+            summary = "; ".join(
+                f"{item['page']}={item['label'] or 'unclassified'}{'(drop)' if not item['keep'] else ''}"
+                for item in mid_diag
+            )
+            logger.info("[mid-pass] page classifications → %s", summary)
+        except Exception:
+            pass
+        dropped = [item["page"] for item in mid_diag if not item.get("keep")]
+        if dropped:
+            logger.info("[mid-pass] dropping pages before second pass: %s", dropped)
+    if filtered_pages:
+        selected_pages = filtered_pages
+    elif mid_diag:
+        logger.warning("[mid-pass] classifier removed all pages; reverting to original selection")
+
+    second_start = time.time()
     selected_bytes = build_pdf_from_pages(orig_bytes, selected_pages)
 
     # Second pass
-    _t1 = time.time()
     stem = pdf_p.stem
     sel_name = CFG.get("passes", {}).get("second", {}).get("selected_pdf_name", "{stem}_selected.pdf").format(stem=stem)
     second_res = call_fracto(
@@ -235,9 +273,10 @@ def run_cli(argv: List[str]) -> int:
         sel_json = CFG.get("passes", {}).get("second", {}).get("selected_json_name", "{stem}_selected_ocr.json").format(stem=stem)
         with open(Path(pdf_p).with_name(sel_json), "w", encoding="utf-8") as fh:
             json.dump(second_res, fh, indent=2)
-    second_pass_time = time.time() - _t1
+    second_pass_time = time.time() - second_start
 
     # Third pass setup
+    third_start = time.time()
     pd_payload = (second_res.get("data", {}) or {}).get("parsedData", {})
     org_type_raw = _second_pass_org_type(pd_payload)
     company_type = (str(org_type_raw).strip().lower() if org_type_raw else "corporate")
@@ -263,12 +302,25 @@ def run_cli(argv: List[str]) -> int:
         })
     if not classification:
         tmp: List[dict] = []
-        for sel_idx, orig_pno in enumerate(selected_pages, start=1):
-            res = results[orig_pno - 1] or {}
-            pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
-            dt = pdict.get("Document_type")
-            if dt and str(dt).strip().lower() != "others":
-                tmp.append({"page_number": sel_idx, "doc_type": dt})
+        if results:
+            for sel_idx, orig_pno in enumerate(selected_pages, start=1):
+                if not (1 <= orig_pno <= len(results)):
+                    continue
+                res = results[orig_pno - 1] or {}
+                pdict = (res.get("data", {}) or {}).get("parsedData", {}) or {}
+                dt = pdict.get("Document_type")
+                if dt and str(dt).strip().lower() != "others":
+                    tmp.append({"page_number": sel_idx, "doc_type": dt})
+        elif mid_diag:
+            label_map = {int(it.get("page", 0)): str(it.get("label") or "") for it in mid_diag if isinstance(it, dict)}
+            for sel_idx, orig_pno in enumerate(selected_pages, start=1):
+                raw = label_map.get(orig_pno, "")
+                if not raw:
+                    continue
+                human = raw.replace("_", " ")
+                dt_norm = normalize_doc_type(human)
+                if dt_norm and dt_norm != "Others":
+                    tmp.append({"page_number": sel_idx, "doc_type": dt_norm})
         classification = tmp
 
     # Log visibility for second-pass → third-pass flow
@@ -306,6 +358,17 @@ def run_cli(argv: List[str]) -> int:
             )
         except Exception:
             pass
+        third_pass_time = time.time() - third_start
+        total_time = time.time() - overall_start
+        measured_sum = setup_time + first_pass_time + pre_second_time + second_pass_time + third_pass_time
+        drift = total_time - measured_sum
+        if abs(drift) > 1e-6:
+            third_pass_time += drift
+            measured_sum = setup_time + first_pass_time + pre_second_time + second_pass_time + third_pass_time
+        logger.info(
+            "Timing summary → setup: %.2fs | first: %.2fs | pre-second: %.2fs | second: %.2fs | third: %.2fs | total: %.2fs",
+            setup_time, first_pass_time, pre_second_time, second_pass_time, third_pass_time, total_time,
+        )
         return 0
 
     # Third pass per group (parallelized)
@@ -415,27 +478,25 @@ def run_cli(argv: List[str]) -> int:
             str(pdf_p), stem, combined_rows, groups, routing_used, company_type,
             out_path_override=json_out, first_pass_results=results, second_pass_result=second_res, third_pass_raw=third_pass_raw,
         )
+        third_pass_time = time.time() - third_start
         total_time = time.time() - overall_start
-        logger.info(
-            "Timing summary → First pass: %.2fs | Second pass: %.2fs | Third pass: %.2fs | Total: %.2fs",
-            first_pass_time, second_pass_time, 0.0, total_time,
+    else:
+        _ = excel_ops._write_statements_workbook(str(pdf_p), stem, combined_sheets, routing_used=routing_used, periods_by_doc=None)
+        json_ops.write_statements_json(
+            str(pdf_p), stem, combined_rows, groups, routing_used, company_type,
+            out_path_override=json_out, first_pass_results=results, second_pass_result=second_res, third_pass_raw=third_pass_raw,
         )
-        return 0
+        third_pass_time = time.time() - third_start
+        total_time = time.time() - overall_start
 
-    # Write workbook and JSON when there is data
-    _t2 = time.time()
-    _ = excel_ops._write_statements_workbook(str(pdf_p), stem, combined_sheets, routing_used=routing_used, periods_by_doc=None)
-    third_pass_time = time.time() - _t2
-
-    json_ops.write_statements_json(
-        str(pdf_p), stem, combined_rows, groups, routing_used, company_type,
-        out_path_override=json_out, first_pass_results=results, second_pass_result=second_res, third_pass_raw=third_pass_raw,
-    )
-
-    total_time = time.time() - overall_start
+    measured_sum = setup_time + first_pass_time + pre_second_time + second_pass_time + third_pass_time
+    drift = total_time - measured_sum
+    if abs(drift) > 1e-6:
+        third_pass_time += drift
+        measured_sum = setup_time + first_pass_time + pre_second_time + second_pass_time + third_pass_time
     logger.info(
-        "Timing summary → First pass: %.2fs | Second pass: %.2fs | Third pass: %.2fs | Total: %.2fs",
-        first_pass_time, second_pass_time, third_pass_time, total_time,
+        "Timing summary → setup: %.2fs | first: %.2fs | pre-second: %.2fs | second: %.2fs | third: %.2fs | total: %.2fs",
+        setup_time, first_pass_time, pre_second_time, second_pass_time, third_pass_time, total_time,
     )
     return 0
 

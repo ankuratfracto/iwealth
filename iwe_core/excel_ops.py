@@ -21,12 +21,14 @@ from iwe_core.debug_utils import (
     debug_flag_from_cfg,
 )
 from iwe_core.grouping import normalize_doc_type
+from iwe_core.pdf_ops import get_page_count_from_bytes
 from iwe_core.json_ops import (
     extract_rows as _extract_rows,
     extract_period_maps_from_payload as _extract_period_maps_from_payload,
     scan_group_jsons_for_periods as _scan_group_jsons_for_periods,
 )
 from iwe_core import analytics as _analytics
+from iwe_core.mid_pass import filter_pages_via_mid_pass
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2940,26 +2942,55 @@ def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes
       • 3rd pass per doc_type; each statement in its own sheet
     Returns workbook bytes or None.
     """
-    # 1) First pass
-    results = call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=EXTRA_ACCURACY_FIRST)
+    # 1) First pass (optional)
+    first_enabled = bool(CFG.get("passes", {}).get("first", {}).get("enable", True))
+    results = []
+    stem = Path(original_filename).stem
 
-    total_pages = len(results) if results else 0
-    selected_pages = [
-        idx + 1
-        for idx, res in enumerate(results or [])
-        if (res.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "Others").strip().lower() != "others"
-    ]
-    # Be lenient: include neighbours so we don't miss page-2 of P&L/Cashflow
-    selected_pages = expand_selected_pages(selected_pages, total_pages, radius=1)
+    if first_enabled:
+        results = call_fracto_parallel(pdf_bytes, original_filename, extra_accuracy=EXTRA_ACCURACY_FIRST)
+        total_pages = len(results) if results else 0
+        selected_pages = [
+            idx + 1
+            for idx, res in enumerate(results or [])
+            if (res.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "Others").strip().lower() != "others"
+        ]
+        selected_pages = expand_selected_pages(selected_pages, total_pages, radius=1)
+    else:
+        total_pages = get_page_count_from_bytes(pdf_bytes)
+        selected_pages = list(range(1, total_pages + 1))
+
     if not selected_pages:
         return None
+
+    filtered_pages, mid_diag = filter_pages_via_mid_pass(
+        pdf_bytes,
+        selected_pages,
+        stem=stem,
+        logger_obj=logger,
+    )
+    if mid_diag:
+        try:
+            summary = "; ".join(
+                f"{item['page']}={item['label'] or 'unclassified'}{'(drop)' if not item['keep'] else ''}"
+                for item in mid_diag
+            )
+            logger.info("[mid-pass] page classifications → %s", summary)
+        except Exception:
+            pass
+        dropped = [item["page"] for item in mid_diag if not item.get("keep")]
+        if dropped:
+            logger.info("[mid-pass] dropping pages before second pass: %s", dropped)
+    if filtered_pages:
+        selected_pages = filtered_pages
+    elif mid_diag:
+        logger.warning("[mid-pass] classifier removed all pages; reverting to previous selection")
 
     # Build selected.pdf
     from iwe_core.pdf_ops import build_pdf_from_pages
     selected_bytes = build_pdf_from_pages(pdf_bytes, selected_pages)
 
     # 2) Second pass
-    stem = Path(original_filename).stem
     second_res = call_fracto(
         selected_bytes,
         f"{stem}_selected.pdf",
@@ -2974,12 +3005,26 @@ def generate_statements_excel(pdf_bytes: bytes, original_filename: str) -> bytes
         if isinstance(second_res, dict) else []
     ) or []
     if not classification:
-        classification = [
-            {"page_number": i + 1, "doc_type": r.get("data", {}).get("parsedData", {}).get("Document_type")}
-            for i, r in enumerate(results or [])
-            if (r.get("data", {}).get("parsedData", {}).get("Document_type", "Others") or "Others").strip().lower() != "others"
-        ]
-        classification = [it for it in classification if (it["page_number"] in selected_pages)]
+        tmp: list[dict] = []
+        if results:
+            for sel_idx, orig_page in enumerate(selected_pages, start=1):
+                if not (1 <= orig_page <= len(results)):
+                    continue
+                res = results[orig_page - 1] or {}
+                dt = (res.get("data", {}) or {}).get("parsedData", {}).get("Document_type")
+                if dt and str(dt).strip().lower() != "others":
+                    tmp.append({"page_number": sel_idx, "doc_type": dt})
+        elif mid_diag:
+            label_map = {int(it.get("page", 0)): str(it.get("label") or "") for it in mid_diag if isinstance(it, dict)}
+            for sel_idx, orig_page in enumerate(selected_pages, start=1):
+                raw = label_map.get(orig_page, "")
+                if not raw:
+                    continue
+                human = raw.replace("_", " ")
+                dt_norm = normalize_doc_type(human)
+                if dt_norm and dt_norm != "Others":
+                    tmp.append({"page_number": sel_idx, "doc_type": dt_norm})
+        classification = tmp
     groups = build_groups(selected_pages, classification, pdf_bytes)
     if not groups:
         return None
